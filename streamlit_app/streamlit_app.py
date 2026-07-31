@@ -710,6 +710,157 @@ COMP_VALUE_COL = (ITEM_COL if fmt_info.get("reshaped") and ITEM_COL in df.column
                   else score_col)
 COMP_VALUE_IS_PCT = COMP_VALUE_COL == ITEM_COL
 
+# ---------------------------------------------------------------------------
+#  Competency / question filtering — shared by Deep Dive and the Map
+# ---------------------------------------------------------------------------
+# The questions reach a tab in one of two shapes and a tab should not have to
+# care which:
+#   LONG  normalize_dataset melted Q1..Qn into `comp_col`, so one row is one
+#         child's answer to one question and the value is in COMP_VALUE_COL.
+#   WIDE  the melt was skipped (dataset too large to expand, or the file
+#         already had its own competency column) and Q1..Qn are still columns.
+# Both are reduced below to the same thing: "% correct on the selected
+# questions", so a filtered chart means exactly what an unfiltered one means.
+def _qnum(q):
+    """Sort key so Q2 comes before Q10 and unnumbered labels sort last."""
+    _m = re.search(r"\d+", str(q))
+    return (0, int(_m.group()), "") if _m else (1, 0, str(q))
+
+
+def question_universe(frame):
+    """('long' | 'wide' | None, [question ids]) for `frame`."""
+    if (comp_col and comp_col in frame.columns
+            and COMP_VALUE_COL in frame.columns and COMP_VALUE_IS_PCT):
+        qs = [str(q) for q in pd.unique(frame[comp_col].dropna())]
+        if qs:
+            return "long", sorted(qs, key=_qnum)
+    wide = [c for c in frame.columns
+            if re.fullmatch(r"[Qq]\s*_?\d+", str(c).strip())
+            and pd.api.types.is_numeric_dtype(frame[c])
+            and pd.notna(frame[c].max()) and float(frame[c].max()) <= 1]
+    if wide:
+        return "wide", sorted(wide, key=_qnum)
+    return None, []
+
+
+def competency_of(q):
+    """Question id -> competency name from the uploaded map (identity if none)."""
+    return QMAP.get(str(q), str(q)) if QMAP else str(q)
+
+
+def competency_question_filter(frame, key, box=None, show=True):
+    """Resolve the question selection for a tab, optionally with UI.
+
+    With show=True this renders Competency + Question multiselects. With
+    show=False it renders nothing and selects every question — a tab that
+    only wants the shape-independent plumbing (which column holds the value,
+    how to break skills down) can call it without adding widgets.
+
+    An empty selection means "everything", so the default state leaves the
+    tab's data exactly as it would have been without this filter.
+
+    Returns a dict:
+      frame        the filtered frame
+      col          the column to average for the metric
+      is_pct       whether that column is already a percentage
+      label        what to call it on an axis
+      narrowed     True when a strict subset of questions is active
+      questions    the selected question ids
+      competencies the selected competency names
+      kind         'long' | 'wide' | None
+    """
+    box = box or st
+    kind, qs = question_universe(frame)
+    res = {"frame": frame, "col": score_col, "is_pct": False,
+           "label": f"Avg {score_col}", "narrowed": False, "questions": qs,
+           "competencies": [], "kind": kind, "n_all": len(qs)}
+    if not qs:
+        return res
+
+    cmap = {q: competency_of(q) for q in qs}
+    comps = list(dict.fromkeys(cmap[q] for q in qs))
+    # Only offer the competency box when the map actually groups things. With
+    # no map loaded every question is its own "competency" and the two boxes
+    # would be duplicates of each other.
+    mapped = bool(QMAP) and len(comps) < len(qs)
+
+    csel, qsel = [], []
+    if show:
+        _fc = box.columns([1, 1.3])
+        csel = (_fc[0].multiselect(
+            f"🎯 Competency — {len(comps)} in the question map", comps,
+            default=[], key=f"{key}_comp", placeholder="All competencies",
+            help="Groups from the question-map CSV. Picking one narrows the "
+                 "question list beside it.") if mapped else [])
+        pool = [q for q in qs if not csel or cmap[q] in csel]
+        qsel = _fc[1].multiselect(
+            f"❓ Question — {len(pool)} available", pool, default=[],
+            key=f"{key}_q", placeholder="All questions in that selection",
+            format_func=(lambda q: f"{q} · {cmap[q]}") if mapped else str,
+            help="Leave empty for every question above.")
+    else:
+        pool = list(qs)
+
+    sel = list(qsel) if qsel else pool
+    res["questions"] = sel
+    res["competencies"] = csel or comps
+    res["narrowed"] = len(sel) < len(qs)
+
+    if kind == "long":
+        res["col"] = COMP_VALUE_COL
+        res["is_pct"] = COMP_VALUE_IS_PCT
+        res["label"] = "% correct" if COMP_VALUE_IS_PCT else f"Avg {score_col}"
+        if res["narrowed"]:
+            res["frame"] = frame[frame[comp_col].astype(str)
+                                 .isin(set(map(str, sel)))]
+    else:                                   # wide: rebuild the % from columns
+        _f = frame
+        if res["narrowed"]:
+            _f = frame.copy()
+            _f["_qsel_pct"] = _f[sel].mean(axis=1) * 100.0
+        elif (score_col in frame.columns
+                and pd.notna(frame[score_col].max())
+                and frame[score_col].max() <= len(qs)):
+            # score_col is a raw total out of len(qs) — put it on the same
+            # 0-100 scale as the filtered case so the axis never jumps
+            _f = frame.copy()
+            _f["_qsel_pct"] = _f[score_col] * 100.0 / len(qs)
+        if _f is not frame:
+            res.update(frame=_f, col="_qsel_pct", is_pct=True,
+                       label="% correct")
+
+    if res["narrowed"]:
+        box.caption(
+            f"🔎 **{len(sel)} of {len(qs)} questions** selected"
+            + (f" · competencies: {', '.join(map(str, csel))}" if csel else "")
+            + " — every number below is *% correct on these questions only*, "
+              "not the child's overall score.")
+    return res
+
+
+def question_means(frame, res, by="Question"):
+    """Mean % correct per question (or per competency) — works on both shapes."""
+    if res["kind"] == "long":
+        s = frame.groupby(comp_col, observed=True)[COMP_VALUE_COL].mean()
+        s.index = s.index.astype(str)
+        s = s.reindex([q for q in res["questions"] if q in set(s.index)])
+    elif res["kind"] == "wide":
+        _q = [q for q in res["questions"] if q in frame.columns]
+        s = frame[_q].mean() * 100.0
+        s.index = s.index.astype(str)
+    else:
+        return pd.Series(dtype=float)
+    if by == "Competency":
+        s = s.groupby(s.index.map(competency_of)).mean()
+    return s.dropna()
+
+
+def question_label(q):
+    """'Q3 · Numeracy' when a map is loaded, plain 'Q3' when it isn't."""
+    c = competency_of(q)
+    return f"{q} · {c}" if str(c) != str(q) else str(q)
+
+
 # Grade/class filter, when such a column exists
 grade_col = next((c for c in cols["categorical"]
                   if str(c).lower() in ("grade", "class", "std", "standard")), None)
@@ -1593,9 +1744,14 @@ with tabs[2]:
                 # the gap as the line between them, and greys out differences
                 # that are within chance so nobody reads noise as a finding.
                 with _t0:
-                    if not (comp_col and comp_col in _gg.columns):
-                        st.info("Needs a competency column to break skills down.")
-                    else:
+                    # Skills live in ONE OF TWO PLACES. Melted datasets put
+                    # them in comp_col; datasets too large to melt keep them
+                    # as Q1..Qn COLUMNS. Only the first was handled, so this
+                    # panel said "needs a competency column" on every dataset
+                    # over the melt limit — including the full 1M-row file —
+                    # even though the questions were sitting right there.
+                    dd, _sk_err = None, None
+                    if comp_col and comp_col in _gg.columns:
                         # Two plain unstacks rather than one named aggregation:
                         # .agg(mean=..., n=...).unstack() builds a MultiIndex
                         # whose level order depends on the data, and blew up
@@ -1606,7 +1762,7 @@ with tabs[2]:
                         _cnt = _gb.size().unstack()
                         _have = set(map(str, _mean.columns))
                         if not {"Female", "Male"}.issubset(_have) or _mean.empty:
-                            st.info("Need both girls and boys present to compare.")
+                            _sk_err = "Need both girls and boys present to compare."
                         else:
                             dd = pd.DataFrame({
                                 "skill": _mean.index.astype(str),
@@ -1618,119 +1774,164 @@ with tabs[2]:
                             if not COMP_VALUE_IS_PCT:
                                 dd["girls"] = _pctg(dd["girls"])
                                 dd["boys"] = _pctg(dd["boys"])
-                            dd["gap"] = dd["girls"] - dd["boys"]
+                    elif _qg:
+                        _gfw = _gg[_gg["_g"] == "Female"]
+                        _gmw = _gg[_gg["_g"] == "Male"]
+                        if not len(_gfw) or not len(_gmw):
+                            _sk_err = "Need both girls and boys present to compare."
+                        else:
+                            # One row per CHILD here, so ng/nb are the group
+                            # sizes and the significance test below is valid.
+                            dd = pd.DataFrame({
+                                "skill": [str(q) for q in _qg],
+                                "girls": [float(_gfw[q].mean()) * 100 for q in _qg],
+                                "boys":  [float(_gmw[q].mean()) * 100 for q in _qg],
+                                "ng":    float(len(_gfw)),
+                                "nb":    float(len(_gmw))})
+                            dd = dd.dropna(subset=["girls", "boys"])
+                    else:
+                        _sk_err = ("This dataset has no per-question or "
+                                   "competency columns, so the gap cannot be "
+                                   "split by skill. The other three sub-tabs "
+                                   "still work.")
 
-                            # Within ONE competency each row is one child, so
-                            # these counts are genuinely independent and the
-                            # test is valid (see units.py for why pooling
-                            # across competencies would not be).
-                            _flags, _ps = [], []
-                            for _r in dd.itertuples():
-                                _, _p, _ = proportion_test(
-                                    _r.girls, _r.boys,
-                                    max(int(_r.ng), 1), max(int(_r.nb), 1))
-                                _ps.append(_p)
-                                _flags.append(_p < 0.05)
-                            dd["p"] = _ps
-                            dd["real"] = _flags
-                            dd = dd.sort_values("gap").reset_index(drop=True)
-
-                            _gall = float(np.average(dd["girls"], weights=dd["ng"]))
-                            _ball = float(np.average(dd["boys"], weights=dd["nb"]))
-                            _nreal = int(dd["real"].sum())
-                            _lead_w = ("girls" if _gall > _ball else "boys")
-                            st.markdown(
-                                f"#### Out of every 100 questions answered, "
-                                f"girls get **{_gall:.0f}** right and boys get "
-                                f"**{_ball:.0f}** right.")
-                            st.caption(
-                                f"That is a {abs(_gall-_ball):.1f}-point overall "
-                                f"lead for {_lead_w}. Below, each row is one "
-                                f"skill: the two dots are the two groups, and "
-                                f"the bar between them is the gap. "
-                                f"**{_nreal} of {len(dd)} skills** show a gap "
-                                f"bigger than chance would explain — the rest "
-                                f"are drawn in grey and should not be acted on.")
-
-                            PINK, BLUE, GREY = "#ff2d78", "#00b4d8", "#9aa4b2"
-                            figd = go.Figure()
-                            for _real, _clr, _nm in ((True, "#ffb703", "Real difference"),
-                                                     (False, GREY, "Within chance")):
-                                _sub = dd[dd["real"] == _real]
-                                if _sub.empty:
-                                    continue
-                                _xs, _ys = [], []
-                                for _r in _sub.itertuples():
-                                    _xs += [_r.boys, _r.girls, None]
-                                    _ys += [_r.skill, _r.skill, None]
-                                figd.add_trace(go.Scatter(
-                                    x=_xs, y=_ys, mode="lines", name=_nm,
-                                    line=dict(color=_clr, width=7),
-                                    opacity=0.55, hoverinfo="skip"))
-                            for _col, _clr, _nm, _cnt in (
-                                    ("boys", BLUE, "👦 Boys", "nb"),
-                                    ("girls", PINK, "👧 Girls", "ng")):
-                                figd.add_trace(go.Scatter(
-                                    x=dd[_col], y=dd["skill"], mode="markers",
-                                    name=_nm,
-                                    marker=dict(color=_clr, size=15,
-                                                line=dict(color="white", width=1.5)),
-                                    customdata=np.stack([dd[_cnt], dd["p"]], axis=-1),
-                                    hovertemplate=("<b>%{y}</b><br>" + _nm +
-                                                   ": %{x:.1f}% correct<br>"
-                                                   "%{customdata[0]:,.0f} children"
-                                                   "<extra></extra>")))
-                            figd.update_layout(
-                                height=max(340, 26 * len(dd) + 130),
-                                xaxis_title="% of questions answered correctly",
-                                yaxis_title="", margin=dict(t=10, b=10, l=10, r=10),
-                                legend=dict(orientation="h", yanchor="bottom",
-                                            y=1.02, x=0),
-                                hovermode="closest")
-                            figd.update_xaxes(ticksuffix="%")
-                            st.plotly_chart(figd, width='stretch')
-                            st.caption(
-                                "**How to read:** pink dot = girls, blue dot = "
-                                "boys, on the same 0–100% scale. The further "
-                                "right a dot, the better that group did. A long "
-                                "bar between them means a big gap; a short bar "
-                                "means they are close. **Yellow = the gap is "
-                                "real; grey = too small to distinguish from "
-                                "chance.** Unlike a gap-only chart, this also "
-                                "shows whether both groups are doing well or "
-                                "both are struggling.")
-
-                            _wr = dd[dd["real"]]
-                            if not _wr.empty:
-                                _b = _wr.iloc[0]
-                                _g = _wr.iloc[-1]
-                                st.markdown(
-                                    f"- Biggest **real** boys' lead: **{_b.skill}** "
-                                    f"— boys {_b.boys:.0f}% vs girls {_b.girls:.0f}% "
-                                    f"({abs(_b.gap):.1f} pts)\n"
-                                    f"- Biggest **real** girls' lead: **{_g.skill}** "
-                                    f"— girls {_g.girls:.0f}% vs boys {_g.boys:.0f}% "
-                                    f"({abs(_g.gap):.1f} pts)")
+                    # roll up to named competencies, or at least label with them
+                    if dd is not None and len(dd) and QMAP:
+                        _gsk = {competency_of(s) for s in dd["skill"]}
+                        if len(_gsk) < len(dd):
+                            _gby = st.radio(
+                                "Break the gap down by",
+                                ["Competency", "Question"], horizontal=True,
+                                key="gg_by")
+                            if _gby == "Competency":
+                                dd["skill"] = dd["skill"].map(competency_of)
+                                dd = (dd.groupby("skill", as_index=False)
+                                        .agg(girls=("girls", "mean"),
+                                             boys=("boys", "mean"),
+                                             # children, not child-questions:
+                                             # averaging over 4 questions does
+                                             # not give 4x the sample
+                                             ng=("ng", "min"), nb=("nb", "min")))
                             else:
-                                st.success(
-                                    "No skill shows a girls-vs-boys difference "
-                                    "beyond chance in this selection — on this "
-                                    "evidence, gender is not where the problem is.")
+                                dd["skill"] = [question_label(s)
+                                               for s in dd["skill"]]
 
-                            with st.expander("Show the numbers"):
-                                _tbl = dd[["skill", "girls", "boys", "gap",
-                                           "ng", "nb", "p", "real"]].copy()
-                                _tbl.columns = ["Skill", "Girls %", "Boys %",
-                                                "Gap (G−B)", "Girls (n)",
-                                                "Boys (n)", "p-value",
-                                                "Real difference?"]
-                                # use_container_width, NOT width='stretch':
-                                # st.dataframe takes width as an int until
-                                # Streamlit 1.49, so a string raises TypeError.
-                                st.dataframe(
-                                    _tbl.round({"Girls %": 1, "Boys %": 1,
-                                                "Gap (G−B)": 1, "p-value": 4}),
-                                    use_container_width=True, hide_index=True)
+                    if dd is None or not len(dd):
+                        st.info(_sk_err or "No skill-level data in this selection.")
+                    else:
+                        dd["gap"] = dd["girls"] - dd["boys"]
+
+                        # Within ONE competency each row is one child, so
+                        # these counts are genuinely independent and the
+                        # test is valid (see units.py for why pooling
+                        # across competencies would not be).
+                        _flags, _ps = [], []
+                        for _r in dd.itertuples():
+                            _, _p, _ = proportion_test(
+                                _r.girls, _r.boys,
+                                max(int(_r.ng), 1), max(int(_r.nb), 1))
+                            _ps.append(_p)
+                            _flags.append(_p < 0.05)
+                        dd["p"] = _ps
+                        dd["real"] = _flags
+                        dd = dd.sort_values("gap").reset_index(drop=True)
+
+                        _gall = float(np.average(dd["girls"], weights=dd["ng"]))
+                        _ball = float(np.average(dd["boys"], weights=dd["nb"]))
+                        _nreal = int(dd["real"].sum())
+                        _lead_w = ("girls" if _gall > _ball else "boys")
+                        st.markdown(
+                            f"#### Out of every 100 questions answered, "
+                            f"girls get **{_gall:.0f}** right and boys get "
+                            f"**{_ball:.0f}** right.")
+                        st.caption(
+                            f"That is a {abs(_gall-_ball):.1f}-point overall "
+                            f"lead for {_lead_w}. Below, each row is one "
+                            f"skill: the two dots are the two groups, and "
+                            f"the bar between them is the gap. "
+                            f"**{_nreal} of {len(dd)} skills** show a gap "
+                            f"bigger than chance would explain — the rest "
+                            f"are drawn in grey and should not be acted on.")
+
+                        PINK, BLUE, GREY = "#ff2d78", "#00b4d8", "#9aa4b2"
+                        figd = go.Figure()
+                        for _real, _clr, _nm in ((True, "#ffb703", "Real difference"),
+                                                 (False, GREY, "Within chance")):
+                            _sub = dd[dd["real"] == _real]
+                            if _sub.empty:
+                                continue
+                            _xs, _ys = [], []
+                            for _r in _sub.itertuples():
+                                _xs += [_r.boys, _r.girls, None]
+                                _ys += [_r.skill, _r.skill, None]
+                            figd.add_trace(go.Scatter(
+                                x=_xs, y=_ys, mode="lines", name=_nm,
+                                line=dict(color=_clr, width=7),
+                                opacity=0.55, hoverinfo="skip"))
+                        for _col, _clr, _nm, _cnt in (
+                                ("boys", BLUE, "👦 Boys", "nb"),
+                                ("girls", PINK, "👧 Girls", "ng")):
+                            figd.add_trace(go.Scatter(
+                                x=dd[_col], y=dd["skill"], mode="markers",
+                                name=_nm,
+                                marker=dict(color=_clr, size=15,
+                                            line=dict(color="white", width=1.5)),
+                                customdata=np.stack([dd[_cnt], dd["p"]], axis=-1),
+                                hovertemplate=("<b>%{y}</b><br>" + _nm +
+                                               ": %{x:.1f}% correct<br>"
+                                               "%{customdata[0]:,.0f} children"
+                                               "<extra></extra>")))
+                        figd.update_layout(
+                            height=max(340, 26 * len(dd) + 130),
+                            xaxis_title="% of questions answered correctly",
+                            yaxis_title="", margin=dict(t=10, b=10, l=10, r=10),
+                            legend=dict(orientation="h", yanchor="bottom",
+                                        y=1.02, x=0),
+                            hovermode="closest")
+                        figd.update_xaxes(ticksuffix="%")
+                        st.plotly_chart(figd, width='stretch')
+                        st.caption(
+                            "**How to read:** pink dot = girls, blue dot = "
+                            "boys, on the same 0–100% scale. The further "
+                            "right a dot, the better that group did. A long "
+                            "bar between them means a big gap; a short bar "
+                            "means they are close. **Yellow = the gap is "
+                            "real; grey = too small to distinguish from "
+                            "chance.** Unlike a gap-only chart, this also "
+                            "shows whether both groups are doing well or "
+                            "both are struggling.")
+
+                        _wr = dd[dd["real"]]
+                        if not _wr.empty:
+                            _b = _wr.iloc[0]
+                            _g = _wr.iloc[-1]
+                            st.markdown(
+                                f"- Biggest **real** boys' lead: **{_b.skill}** "
+                                f"— boys {_b.boys:.0f}% vs girls {_b.girls:.0f}% "
+                                f"({abs(_b.gap):.1f} pts)\n"
+                                f"- Biggest **real** girls' lead: **{_g.skill}** "
+                                f"— girls {_g.girls:.0f}% vs boys {_g.boys:.0f}% "
+                                f"({abs(_g.gap):.1f} pts)")
+                        else:
+                            st.success(
+                                "No skill shows a girls-vs-boys difference "
+                                "beyond chance in this selection — on this "
+                                "evidence, gender is not where the problem is.")
+
+                        with st.expander("Show the numbers"):
+                            _tbl = dd[["skill", "girls", "boys", "gap",
+                                       "ng", "nb", "p", "real"]].copy()
+                            _tbl.columns = ["Skill", "Girls %", "Boys %",
+                                            "Gap (G−B)", "Girls (n)",
+                                            "Boys (n)", "p-value",
+                                            "Real difference?"]
+                            # use_container_width, NOT width='stretch':
+                            # st.dataframe takes width as an int until
+                            # Streamlit 1.49, so a string raises TypeError.
+                            st.dataframe(
+                                _tbl.round({"Girls %": 1, "Boys %": 1,
+                                            "Gap (G−B)": 1, "p-value": 4}),
+                                use_container_width=True, hide_index=True)
 
                 # ---- 1: per competency / per question item ------------------
                 with _t1:
@@ -2292,30 +2493,43 @@ with tabs[4]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab4_fragment():
-        _qd = [c for c in fdf.columns if re.fullmatch(r"[Qq]\d+", str(c))
-               and pd.api.types.is_numeric_dtype(fdf[c])]
-        _ood = len(_qd) if _qd and fdf[score_col].max() <= len(_qd) else None
-        _dpct = (lambda s: s * 100.0 / _ood) if _ood else (lambda s: s)
-        _dlab = "% correct" if _ood else "Avg score"
+        # show=False: no filter widgets here, just the shape-independent
+        # plumbing. This tab previously looked for Q1..Qn COLUMNS, which only
+        # exist when the melt was skipped — on the melted dataset the
+        # per-question chart below never rendered at all.
+        QF = competency_question_filter(fdf, "dd", show=False)
+        ddf, _dcol, _dlab = QF["frame"], QF["col"], QF["label"]
+        _dpct = lambda s: s            # _dcol is already on the right scale
         DMIN_N = MINN
+        # group the skill breakdown by named competency when a map is loaded
+        _dd_by = "Question"
+        if QF["kind"] and QMAP and len(QF["competencies"]) < len(QF["questions"]):
+            _dd_by = st.radio("Break skills down by", ["Competency", "Question"],
+                              horizontal=True, key="dd_by")
 
         # ================= A) Unit report card (drill-down) ===================
         st.markdown("#### 🔬 Unit report card")
+        # one row is one ANSWER after the melt, so count children by id
+        _dsid = sid_col if (sid_col and sid_col in ddf.columns) else None
+        _cnt = ((_dsid, "nunique") if _dsid else (_dcol, "size"))
+        _cntlab = "Students" if _dsid else ("Responses" if QF["kind"] == "long"
+                                            else "Students")
+
         da, db = st.columns([1, 1.6])
         dlevel = da.selectbox("Level", hierarchy, key="dd_level") if hierarchy else None
         if dlevel:
-            _units = (fdf.groupby(dlevel)[score_col].agg(["mean", "size"])
+            _units = (ddf.groupby(dlevel).agg(mean=(_dcol, "mean"), size=_cnt)
                       .query("size >= @DMIN_N").sort_values("mean"))
             if len(_units):
                 dunit = db.selectbox(
                     f"{dlevel} (sorted weakest → strongest, "
                     f"min {DMIN_N} students)", _units.index.tolist(), key="dd_unit")
-                _sub = fdf[fdf[dlevel] == dunit]
+                _sub = ddf[ddf[dlevel] == dunit]
                 _rank = int((_units["mean"] < _units.loc[dunit, "mean"]).sum()) + 1
-                _gapv = _dpct(_sub[score_col].mean()) - _dpct(fdf[score_col].mean())
+                _gapv = _dpct(_sub[_dcol].mean()) - _dpct(ddf[_dcol].mean())
                 dk = st.columns(4)
-                dk[0].metric(_dlab, f"{_dpct(_sub[score_col].mean()):.1f}")
-                dk[1].metric("Students", f"{len(_sub):,}")
+                dk[0].metric(_dlab, f"{_dpct(_sub[_dcol].mean()):.1f}")
+                dk[1].metric(_cntlab, f"{int(_units.loc[dunit, 'size']):,}")
                 dk[2].metric(f"Rank among {len(_units)} {dlevel}s",
                              f"#{len(_units) - _rank + 1}",
                              help="1 = strongest")
@@ -2324,11 +2538,20 @@ with tabs[4]:
 
                 dc1, dc2 = st.columns(2)
                 with dc1:
+                    # a 0/100 item column has only two values — a histogram of
+                    # it is two bars and says nothing. Show the distribution of
+                    # each CHILD's percentage instead.
+                    if QF["is_pct"] and _dsid:
+                        _hsrc = _sub.groupby(_dsid)[_dcol].mean()
+                    else:
+                        _hsrc = _sub[_dcol]
+                    _hall = (ddf.groupby(_dsid)[_dcol].mean().mean()
+                             if (QF["is_pct"] and _dsid) else ddf[_dcol].mean())
                     _hd = pd.DataFrame({
-                        "pct": _dpct(_sub[score_col].astype(float))})
+                        "pct": _dpct(_hsrc.astype(float))})
                     fighd = px.histogram(_hd, x="pct", nbins=20, height=330,
                                          labels={"pct": _dlab})
-                    fighd.add_vline(x=float(_dpct(fdf[score_col].mean())),
+                    fighd.add_vline(x=float(_dpct(_hall)),
                                     line_dash="dash", line_color="#e8d44d",
                                     annotation_text="overall avg",
                                     annotation_font_color="#e8d44d")
@@ -2341,16 +2564,23 @@ with tabs[4]:
                                         title=f"Score distribution — {dunit}")
                     st.plotly_chart(fighd, width='stretch')
                 with dc2:
-                    if _qd:
-                        _dlt = (_sub[_qd].mean() - fdf[_qd].mean()) * 100
+                    # unit vs everyone, per skill — works on the melted shape
+                    # too, and rolls up to named competencies when a map exists
+                    _ov = question_means(ddf, QF, _dd_by)
+                    _un = question_means(_sub, QF, _dd_by)
+                    _dlt = (_un - _ov).dropna()
+                    if len(_dlt):
                         _worst_gap = float(_dlt.min())
                         _dlt = _dlt.sort_values().head(8).iloc[::-1]
-                        figdq = px.bar(x=_dlt.values, y=_dlt.index,
+                        _ylab = ([question_label(i) for i in _dlt.index]
+                                 if _dd_by == "Question" else list(_dlt.index))
+                        figdq = px.bar(x=_dlt.values, y=_ylab,
                                        orientation="h", height=330,
                                        color=_dlt.values,
                                        color_continuous_scale="RdYlGn",
                                        color_continuous_midpoint=0,
-                                       labels={"x": "pts vs overall (per item)",
+                                       labels={"x": f"pts vs overall "
+                                                    f"(per {_dd_by.lower()})",
                                                "y": ""})
                         figdq.update_traces(hovertemplate="<b>%{y}</b>: "
                                             "%{x:+.1f} pts vs the overall average"
@@ -2359,19 +2589,23 @@ with tabs[4]:
                                             margin=dict(t=28, b=8),
                                             paper_bgcolor="rgba(0,0,0,0)",
                                             font=dict(color="#cdd3f7"),
-                                            title="Weakest skills vs overall")
+                                            title=f"Weakest {_dd_by.lower()}s "
+                                                  f"vs overall")
                         if _worst_gap > -1.0:
                             st.success(f"✅ No real skill gaps: {dunit} is within "
                                        f"{abs(_worst_gap):.1f} pts of the overall "
-                                       "average on every single item. The chart "
+                                       f"average on every "
+                                       f"{_dd_by.lower()}. The chart "
                                        "below zooms into those tiny differences.")
                         st.plotly_chart(figdq, width='stretch')
-                        st.caption("**How to read:** each bar = one test "
-                                   f"question; length = how far {dunit} scores "
-                                   "below everyone else on it. The most-negative "
-                                   "bars are its remedial shortlist.")
+                        st.caption(f"**How to read:** each bar = one "
+                                   f"{_dd_by.lower()}; length = how far {dunit} "
+                                   "scores below everyone else on it. The "
+                                   "most-negative bars are its remedial "
+                                   "shortlist.")
                 if year_col and _sub[year_col].nunique() > 1:
-                    _tr = _sub.groupby(year_col)[score_col].agg(["mean", "size"])
+                    _tr = _sub.groupby(year_col).agg(mean=(_dcol, "mean"),
+                                                     size=_cnt)
                     _tr = _tr[_tr["size"] >= DMIN_N]
                     if len(_tr) > 1:
                         _trd = pd.DataFrame({
@@ -2402,7 +2636,12 @@ with tabs[4]:
         st.markdown("#### ⚖️ Equity lens — same average, different fairness")
         if hierarchy:
             elevel = st.selectbox("Compare units at", hierarchy, key="eq_level")
-            _eq = (fdf.groupby(elevel)[score_col]
+            # Quantiles must be taken over CHILDREN. On the melted shape _dcol
+            # is 0 or 100 per answer, so p10=0 and p90=100 for every unit and
+            # the whole chart collapses to one horizontal line at 100.
+            _eqsrc = (ddf.groupby([elevel, _dsid], observed=True)[_dcol]
+                      .mean().reset_index() if _dsid else ddf)
+            _eq = (_eqsrc.groupby(elevel)[_dcol]
                    .agg(avg="mean", p10=lambda s: s.quantile(.10),
                         p90=lambda s: s.quantile(.90), n="size")
                    .query("n >= @DMIN_N"))
@@ -2450,7 +2689,7 @@ with tabs[4]:
 
         st.divider()
         st.markdown("#### 📦 Classic views")
-        # 1) Heatmap: geography x competency
+        # 1) Heatmap: geography x competency (named competencies when mapped)
         if hierarchy and comp_col:
             level = st.selectbox("Heatmap level", hierarchy, index=min(1, len(hierarchy)-1))
             # COMP_VALUE_COL, not score_col: with the questions melted into a
@@ -2458,23 +2697,41 @@ with tabs[4]:
             # same on all of their rows — so every column of a given row held an
             # identical value and the grid was solid horizontal bands
             # (measured: 1 distinct value per row across all 20 competencies).
-            hm = fdf.pivot_table(index=level, columns=comp_col,
-                                 values=COMP_VALUE_COL, aggfunc="mean")
+            _hsub = ddf if QF["kind"] == "long" else fdf
+            _hkey = comp_col
+            if _dd_by == "Competency" and QMAP and comp_col in _hsub.columns:
+                _hsub = _hsub.assign(
+                    _hcomp=_hsub[comp_col].astype(str).map(competency_of))
+                _hkey = "_hcomp"
+            hm = _hsub.pivot_table(index=level, columns=_hkey,
+                                   values=COMP_VALUE_COL, aggfunc="mean")
+            if _hkey == comp_col and QMAP:      # keep Q ids, add the skill name
+                hm.columns = [question_label(c) for c in hm.columns]
             _hlab = "% correct" if COMP_VALUE_IS_PCT else "Avg score"
             fig = px.imshow(hm.round(1), text_auto=True, aspect="auto",
                             color_continuous_scale="RdYlGn",
                             labels=dict(color=_hlab))
-            fig.update_layout(title=f"{_hlab} — {level} × Competency")
+            fig.update_layout(title=f"{_hlab} — {level} × "
+                                    f"{_dd_by if QMAP else 'Competency'}")
             st.plotly_chart(fig, width='stretch')
+            if QMAP:
+                st.caption(f"Columns are **{_dd_by.lower()}s** from the question "
+                           f"map. Red cells are the {level.lower()}-by-skill "
+                           "combinations to target — a whole red column is a "
+                           "curriculum problem, a whole red row is a unit "
+                           "problem.")
 
         c1, c2 = st.columns(2)
         # 2) Box plot: spread/inequality within each unit
         with c1:
             if hierarchy:
                 blevel = st.selectbox("Spread by", hierarchy, index=0, key="box_level")
-                fig = px.box(fdf, x=blevel, y=score_col, points=False)
-                fig.update_layout(title=f"Score spread within each {blevel}",
-                                  yaxis_title="Score")
+                # per child, so the box describes children rather than answers
+                _bsrc = (ddf.groupby([blevel, _dsid], observed=True)[_dcol]
+                         .mean().reset_index() if _dsid else ddf)
+                fig = px.box(_bsrc, x=blevel, y=_dcol, points=False)
+                fig.update_layout(title=f"{_dlab} spread within each {blevel}",
+                                  yaxis_title=_dlab)
                 st.plotly_chart(fig, width='stretch')
                 st.caption("Wide boxes = high inequality inside that unit, even if the average looks fine.")
 
@@ -2531,11 +2788,11 @@ with tabs[4]:
             if cols["subjective"] and hierarchy:
                 factor = st.selectbox("Factor", cols["subjective"], key="scatter_factor")
                 unit = hierarchy[-1]
-                sc = (fdf.groupby([unit, factor], as_index=False)
-                         .agg(avg=(score_col, "mean"), n=(score_col, "size")))
+                sc = (ddf.groupby([unit, factor], as_index=False)
+                         .agg(avg=(_dcol, "mean"), n=_cnt))
                 fig = px.strip(sc, x=factor, y="avg", hover_name=unit)
-                fig.update_layout(title=f"{factor} vs average score (per {unit})",
-                                  yaxis_title="Avg score", xaxis_title="")
+                fig.update_layout(title=f"{factor} vs {_dlab.lower()} (per {unit})",
+                                  yaxis_title=_dlab, xaxis_title="")
                 fig.update_xaxes(tickangle=20)
                 st.plotly_chart(fig, width='stretch')
                 st.caption("Each dot = one " + unit.lower() + " — shows whether the factor tracks outcomes.")
@@ -2855,7 +3112,14 @@ with tabs[8]:
     @st.fragment
     def _tab8_fragment():
         if items_df is not None:
-            item_cols = _find_item_columns(items_df)
+            # ALL_ITEMS is the whole paper and never shrinks. The competency /
+            # question picker below narrows `item_cols`, which controls what is
+            # DISPLAYED — but the discrimination index further down must still
+            # rank students on their full-paper total, or filtering to four
+            # binary items would split the cohort on a 0-4 score and produce
+            # meaningless quartiles.
+            ALL_ITEMS = _find_item_columns(items_df)
+            item_cols = list(ALL_ITEMS)
             idf = items_df.copy()
 
             # Apply the same sidebar slice where the columns exist in the item data
@@ -2867,16 +3131,36 @@ with tabs[8]:
             if year_col and year_col in idf.columns:
                 idf = idf[(idf[year_col] >= year_range[0]) & (idf[year_col] <= year_range[1])]
 
-            st.caption(f"{len(idf):,} student responses × {len(item_cols)} items "
-                       "in current selection")
+            IQF = competency_question_filter(idf, "item")
+            _pick = [q for q in IQF["questions"] if q in ALL_ITEMS]
+            if _pick:
+                item_cols = _pick
+            _iby = "Question"
+            if QMAP and len({competency_of(q) for q in item_cols}) < len(item_cols):
+                _iby = st.radio("Show items as", ["Question", "Competency"],
+                                horizontal=True, key="item_by")
+
+            def _roll(s):
+                """Per-item series -> averaged into competencies, or relabelled.
+
+                Rolling up must AGGREGATE, not just rename: four columns all
+                called 'Algebra' would collide in the bar chart and heatmap.
+                """
+                if _iby == "Competency":
+                    return s.groupby(s.index.map(competency_of)).mean()
+                return s.set_axis([question_label(i) for i in s.index])
+
+            st.caption(f"{len(idf):,} student responses × {len(item_cols)} of "
+                       f"{len(ALL_ITEMS)} items in current selection")
 
             rates = (idf[item_cols].apply(pd.to_numeric, errors="coerce")
-                     .mean().mul(100).round(1))
-            order = rates.sort_values()
+                     .mean().mul(100))
+            order = _roll(rates).round(1).sort_values()
 
-            st.subheader("📉 Hardest questions (lowest % answered correctly)")
+            st.subheader(f"📉 Hardest {_iby.lower()}s "
+                         "(lowest % answered correctly)")
             fig = px.bar(x=order.index, y=order.values,
-                         labels={"x": "Item", "y": "% correct"},
+                         labels={"x": _iby, "y": "% correct"},
                          color=order.values, color_continuous_scale="RdYlGn",
                          range_color=[0, 100], height=380)
             fig.update_layout(coloraxis_showscale=False, margin=dict(t=10, b=10))
@@ -2886,21 +3170,28 @@ with tabs[8]:
             best = order.index[-1] if len(order) else None
             if worst is not None:
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Hardest item", worst, f"{order.iloc[0]:.1f}% correct",
+                c1.metric(f"Hardest {_iby.lower()}", str(worst),
+                          f"{order.iloc[0]:.1f}% correct",
                           delta_color="inverse")
-                c2.metric("Easiest item", best, f"{order.iloc[-1]:.1f}% correct")
+                c2.metric(f"Easiest {_iby.lower()}", str(best),
+                          f"{order.iloc[-1]:.1f}% correct")
                 c3.metric("Spread", f"{order.iloc[-1] - order.iloc[0]:.1f} pts")
 
             st.divider()
             st.subheader("🔥 Item difficulty by group")
             dim_pool = [c for c in idf.columns
-                        if c not in item_cols
-                        and c != score_col          # breaking items down by the
-                        and 1 < idf[c].nunique() <= 40]  # total score is circular
-            if dim_pool:
+                        if c not in ALL_ITEMS     # every Q column, not just the
+                        and c != score_col        # selected ones — breaking
+                        and 1 < idf[c].nunique() <= 40]  # items down by the
+            if dim_pool:                          # total score is circular
                 dim = st.selectbox("Break down items by", dim_pool)
-                heat = (idf.groupby(dim)[item_cols]
-                        .mean().mul(100).round(1))
+                heat = idf.groupby(dim)[item_cols].mean().mul(100)
+                # same aggregate-don't-rename rule as the bar chart above
+                heat = (heat.T.groupby(heat.columns.map(competency_of)).mean().T
+                        if _iby == "Competency"
+                        else heat.set_axis([question_label(c)
+                                            for c in heat.columns], axis=1))
+                heat = heat.round(1)
                 figh = px.imshow(heat, color_continuous_scale="RdYlGn",
                                  zmin=0, zmax=100, aspect="auto",
                                  labels=dict(color="% correct"),
@@ -2914,7 +3205,11 @@ with tabs[8]:
             # Discrimination: top 27% of students minus bottom 27% (by total
             # score) on each item. Near zero = the question does not separate
             # strong from weak learners — likely ambiguous, miskeyed, or guessed.
-            _im = idf[item_cols].apply(pd.to_numeric, errors="coerce")
+            # ALL_ITEMS, not item_cols: the high/low groups must be split on the
+            # student's WHOLE-PAPER score. Ranking them on a filtered subset of
+            # four binary items gives a 0-4 total whose 27th and 73rd
+            # percentiles land on the same value, and the index collapses.
+            _im = idf[ALL_ITEMS].apply(pd.to_numeric, errors="coerce")
             _tot = _im.sum(axis=1)
             _hi = _im[_tot >= _tot.quantile(0.73)]
             _lo = _im[_tot <= _tot.quantile(0.27)]
@@ -3043,73 +3338,84 @@ with tabs[9]:
             _geo = json.load(_f)
         geo_names = {f["properties"]["district"] for f in _geo["features"]}
 
-        # 1 row per district: mean score + record count (respects sidebar filters)
-        _qmap = [c for c in fdf.columns if re.fullmatch(r"[Qq]\d+", str(c))
-                 and pd.api.types.is_numeric_dtype(fdf[c])]
-        _oomap = (len(_qmap) if _qmap and fdf[score_col].max() <= len(_qmap)
-                  else None)
-        m = fdf.groupby(dist_col, as_index=False).agg(
-            avg=(score_col, "mean"), n=(score_col, "size"))
-        if _oomap:
-            m["avg"] = m["avg"] * 100.0 / _oomap
-        # NOTE: do NOT round before coloring — with a tight spread, rounding
-        # quantizes every district to the same value and the map goes one
-        # flat color. Round only in the hover.
-        # Fix spellings, then check the match rate
-        m["geo_name"] = m[dist_col].astype(str).str.strip().replace(DISTRICT_FIX)
-        matched = m[m["geo_name"].isin(geo_names)]
-        unmatched = sorted(m.loc[~m["geo_name"].isin(geo_names), dist_col])
-
-        # --- Demo mode: fake/unmatched district names get assigned to real
-        # Karnataka districts purely for visualization. Deterministic (sorted
-        # + round-robin over free map slots), so it doesn't reshuffle on rerun.
-        demo_assigned = False
-        if unmatched:
-            # Default OFF. This fabricates geographic positions, and a reviewer
-            # who misses the caption would read a real score against the wrong
-            # district. Opt in deliberately, never by default.
-            demo = st.toggle(
-                "🎲 Demo mode: place unmatched districts on the map anyway",
-                value=False,
-                help="Assigns each unmatched district a real Karnataka district "
-                     "slot so the choropleth renders. Positions are FAKE — "
-                     "colors/values are your real data. Use only for previews, "
-                     "never in a submission.")
-            if demo:
-                free = sorted(geo_names - set(matched["geo_name"]))
-                assign = {name: free[i % len(free)]
-                          for i, name in enumerate(unmatched)}
-                m.loc[~m["geo_name"].isin(geo_names), "geo_name"] = (
-                    m.loc[~m["geo_name"].isin(geo_names), dist_col].map(assign))
-                # If several data-districts landed on one map slot, keep the
-                # first (a slot can only be painted one color anyway)
-                overflow = len(m) - m["geo_name"].nunique()
-                m = m.drop_duplicates(subset="geo_name", keep="first")
-                matched = m[m["geo_name"].isin(geo_names)]
-                demo_assigned = True
-                if overflow > 0:
-                    st.warning(f"⚠️ Your data has more districts than the map "
-                               f"has regions (30) — {overflow} district(s) "
-                               f"couldn't be placed and are hidden in demo "
-                               f"mode. All districts still appear in every "
-                               f"other tab.")
-
-        mc1, mc2 = st.columns(2)
-        mc1.metric("Districts matched to map", f"{len(matched)} / {len(m)}")
-        mc2.metric("Map regions with data", f"{len(matched)} / {len(geo_names)}")
-        if unmatched and not demo_assigned:
-            st.warning("Not on the map (fix spellings in DISTRICT_FIX): "
-                       + ", ".join(unmatched[:15])
-                       + (" …" if len(unmatched) > 15 else ""))
-        if demo_assigned:
-            st.info("🎲 Demo mode ON — district *positions* are randomly "
-                    "assigned for visualization only; scores/colors are real. "
-                    "Turn this off for actual Karnataka data.")
-
-        # Fragment: a map click reruns ONLY this section, not the
-        # whole 17-tab script — that full rerun was the long load.
+        # Fragment: the skill filter, the demo toggle and a map click all rerun
+        # ONLY this section, not the whole 18-tab script — that full rerun was
+        # the long load. Everything the map needs is therefore built in here.
         @st.fragment
         def _map_drill_fragment():
+            # ---- competency + question filter -----------------------------
+            st.markdown("##### 🔎 Map a single skill")
+            MQF = competency_question_filter(fdf, "map")
+            mdf, _mcol, _mlab = MQF["frame"], MQF["col"], MQF["label"]
+            _msid = sid_col if (sid_col and sid_col in mdf.columns) else None
+            _mcnt = (_msid, "nunique") if _msid else (_mcol, "size")
+            _mby = "Question"
+            if MQF["kind"] and QMAP and len(MQF["competencies"]) < len(MQF["questions"]):
+                _mby = st.radio("Break skills down by",
+                                ["Competency", "Question"], horizontal=True,
+                                key="map_by")
+
+            # 1 row per district: mean + child count (respects sidebar filters)
+            # `n` counts CHILDREN, not answers — after the melt one child is 20
+            # rows, and labelling that "Students" overstates it 20x.
+            m = mdf.groupby(dist_col, as_index=False).agg(
+                avg=(_mcol, "mean"), n=_mcnt)
+            # NOTE: do NOT round before coloring — with a tight spread, rounding
+            # quantizes every district to the same value and the map goes one
+            # flat color. Round only in the hover.
+            # Fix spellings, then check the match rate
+            m["geo_name"] = m[dist_col].astype(str).str.strip().replace(DISTRICT_FIX)
+            matched = m[m["geo_name"].isin(geo_names)]
+            unmatched = sorted(m.loc[~m["geo_name"].isin(geo_names), dist_col])
+
+            # --- Demo mode: fake/unmatched district names get assigned to real
+            # Karnataka districts purely for visualization. Deterministic
+            # (sorted + round-robin over free slots), so no reshuffle on rerun.
+            demo_assigned = False
+            if unmatched:
+                # Default OFF. This fabricates geographic positions, and a
+                # reviewer who misses the caption would read a real score
+                # against the wrong district. Opt in deliberately, never
+                # by default.
+                demo = st.toggle(
+                    "🎲 Demo mode: place unmatched districts on the map anyway",
+                    value=False, key="map_demo",
+                    help="Assigns each unmatched district a real Karnataka "
+                         "district slot so the choropleth renders. Positions "
+                         "are FAKE — colors/values are your real data. Use "
+                         "only for previews, never in a submission.")
+                if demo:
+                    free = sorted(geo_names - set(matched["geo_name"]))
+                    assign = {name: free[i % len(free)]
+                              for i, name in enumerate(unmatched)}
+                    m.loc[~m["geo_name"].isin(geo_names), "geo_name"] = (
+                        m.loc[~m["geo_name"].isin(geo_names), dist_col].map(assign))
+                    # If several data-districts landed on one map slot, keep
+                    # the first (a slot can only be painted one color anyway)
+                    overflow = len(m) - m["geo_name"].nunique()
+                    m = m.drop_duplicates(subset="geo_name", keep="first")
+                    matched = m[m["geo_name"].isin(geo_names)]
+                    demo_assigned = True
+                    if overflow > 0:
+                        st.warning(f"⚠️ Your data has more districts than the "
+                                   f"map has regions (30) — {overflow} "
+                                   f"district(s) couldn't be placed and are "
+                                   f"hidden in demo mode. All districts still "
+                                   f"appear in every other tab.")
+
+            mc1, mc2 = st.columns(2)
+            mc1.metric("Districts matched to map", f"{len(matched)} / {len(m)}")
+            mc2.metric("Map regions with data",
+                       f"{len(matched)} / {len(geo_names)}")
+            if unmatched and not demo_assigned:
+                st.warning("Not on the map (fix spellings in DISTRICT_FIX): "
+                           + ", ".join(unmatched[:15])
+                           + (" …" if len(unmatched) > 15 else ""))
+            if demo_assigned:
+                st.info("🎲 Demo mode ON — district *positions* are randomly "
+                        "assigned for visualization only; scores/colors are "
+                        "real. Turn this off for actual Karnataka data.")
+
             if len(matched):
                 _spread = float(matched["avg"].max() - matched["avg"].min())
                 stretch = st.toggle(
@@ -3121,8 +3427,10 @@ with tabs[9]:
                          "because it genuinely is).")
                 _rng = ([float(matched["avg"].min()), float(matched["avg"].max())]
                         if stretch and _spread > 0
-                        else ([0, 100] if _oomap else None))
-                _mlab = "Avg % correct" if _oomap else "Avg score"
+                        else ([0, 100] if MQF["is_pct"] else None))
+                _mttl = ("Avg " + _mlab.lower() if not MQF["narrowed"] else
+                         f"{_mlab} on {len(MQF['questions'])} selected "
+                         f"question(s)")
                 figm = px.choropleth(
                     matched, geojson=_geo, locations="geo_name",
                     featureidkey="properties.district",
@@ -3131,14 +3439,15 @@ with tabs[9]:
                     hover_name=dist_col,
                     hover_data={"geo_name": demo_assigned,
                                 "avg": ":.1f", "n": True},
-                    labels={"avg": _mlab, "n": "Records",
+                    labels={"avg": _mttl,
+                            "n": "Students" if _msid else "Records",
                             "geo_name": "Shown at"},
                     height=650)
-                if stretch and _spread < (2.0 if _oomap else 0.5):
+                if stretch and _spread < (2.0 if MQF["is_pct"] else 0.5):
                     st.caption(f"⚠️ True spread between districts is only "
-                               f"{_spread:.2f} {'pts' if _oomap else ''} — colors "
-                               "are stretched to show *relative* rank; the "
-                               "differences are tiny in absolute terms.")
+                               f"{_spread:.2f} {'pts' if MQF['is_pct'] else ''} — "
+                               "colors are stretched to show *relative* rank; "
+                               "the differences are tiny in absolute terms.")
                 figm.update_geos(fitbounds="locations", visible=False,
                                  bgcolor="rgba(0,0,0,0)")
                 figm.update_layout(margin=dict(t=10, b=10, l=10, r=10),
@@ -3148,10 +3457,23 @@ with tabs[9]:
                                       on_select="rerun",
                                       selection_mode="points",
                                       key="map_click")
-                st.caption("Color = avg score per district (red weak → green strong) "
-                           "· respects the sidebar filters · grey districts have no "
-                           "data in the current selection · **click a district to "
-                           "drill in**.")
+                st.caption(f"Color = **{_mttl.lower()}** per district (red weak → "
+                           "green strong) · respects the sidebar filters and "
+                           "the skill filter above · grey districts have no "
+                           "data in the current selection · **click a district "
+                           "to drill in**.")
+                if MQF["narrowed"]:
+                    _wd = matched.sort_values("avg").iloc[0]
+                    _bd = matched.sort_values("avg").iloc[-1]
+                    st.info(
+                        f"🎯 On the selected "
+                        + (", ".join(map(str, MQF["competencies"]))
+                           if len(MQF["competencies"]) <= 3
+                           else f"{len(MQF['questions'])} questions")
+                        + f": weakest is **{_wd[dist_col]}** at "
+                          f"{_wd['avg']:.1f}%, strongest is **{_bd[dist_col]}** "
+                          f"at {_bd['avg']:.1f}% — a "
+                          f"{_bd['avg'] - _wd['avg']:.1f}-point gap.")
 
                 # ---------- click-to-drill: district detail panel ----------
                 _sel_geo = None
@@ -3185,7 +3507,7 @@ with tabs[9]:
                 if _sel_geo is not None and _sel_geo in set(matched["geo_name"]):
                     _row = matched[matched["geo_name"] == _sel_geo].iloc[0]
                     _dname = _row[dist_col]          # name as it exists in the DATA
-                    _dd = fdf[fdf[dist_col] == _dname]
+                    _dd = mdf[mdf[dist_col] == _dname]
                     st.divider()
                     st.markdown(f"### 📍 {_dname}"
                                 + (f"  ·  shown at *{_sel_geo}*"
@@ -3219,33 +3541,57 @@ with tabs[9]:
                                                 == _sel_geo].index[0]) + 1
                         _gapd = float(_row["avg"]) - float(matched["avg"].mean())
                         zk = st.columns(2)
-                        zk[0].metric("Avg " + ("% correct" if _oomap else "score"),
-                                     f"{_row['avg']:.1f}")
-                        zk[1].metric("Students", f"{int(_row['n']):,}")
+                        zk[0].metric(_mttl, f"{_row['avg']:.1f}")
+                        zk[1].metric("Students" if _msid else "Records",
+                                     f"{int(_row['n']):,}")
                         zk2 = st.columns(2)
                         zk2[0].metric(f"Rank of {len(matched)}", f"#{_rk_pos}")
                         zk2[1].metric("vs district average", f"{_gapd:+.1f}",
                                       delta=f"{_gapd:+.1f}")
-                        # weakest items vs everyone (if item columns exist)
-                        if _qmap:
-                            _dq = ((_dd[_qmap].mean() - fdf[_qmap].mean())
-                                   * 100).round(1).sort_values()
-                            _worst3 = _dq.head(3)
-                            st.markdown("**Weakest skills vs overall:** "
-                                        + " · ".join(f"`{i}` {v:+.1f}"
-                                                     for i, v in
-                                                     _worst3.items()))
+
+                    # per-skill profile for this district, vs everyone else.
+                    # Uses the shared helper so it works on the melted shape
+                    # too, and rolls up to named competencies when a map is
+                    # loaded — previously this needed Q1..Qn COLUMNS, which
+                    # the melted dataset does not have, so it never appeared.
+                    _mov = question_means(mdf, MQF, _mby)
+                    _mun = question_means(_dd, MQF, _mby)
+                    _mdlt = (_mun - _mov).dropna().sort_values()
+                    if len(_mdlt):
+                        _mlabels = ([question_label(i) for i in _mdlt.index]
+                                    if _mby == "Question" else list(_mdlt.index))
+                        _fs = px.bar(x=_mdlt.values, y=_mlabels,
+                                     orientation="h", color=_mdlt.values,
+                                     color_continuous_scale="RdYlGn",
+                                     color_continuous_midpoint=0,
+                                     height=max(240, 24 * len(_mdlt) + 80),
+                                     labels={"x": f"pts vs the state average",
+                                             "y": ""})
+                        _fs.update_traces(
+                            hovertemplate="<b>%{y}</b>: %{x:+.1f} pts vs "
+                                          "the state average<extra></extra>")
+                        _fs.update_layout(coloraxis_showscale=False,
+                                          margin=dict(t=30, b=8),
+                                          paper_bgcolor="rgba(0,0,0,0)",
+                                          font=dict(color="#cdd3f7"),
+                                          title=f"{_dname} by "
+                                                f"{_mby.lower()} — where it "
+                                                f"is ahead and behind")
+                        st.plotly_chart(_fs, width='stretch')
+                        _w3 = ", ".join(f"**{_mlabels[i]}** ({_mdlt.iloc[i]:+.1f})"
+                                        for i in range(min(3, len(_mdlt))))
+                        st.caption(f"Red = {_dname} scores below the state on "
+                                   f"that {_mby.lower()}, green = above. "
+                                   f"Its weakest: {_w3}.")
 
                     # blocks inside the district
-                    _blk_col = next((c for c in fdf.columns
+                    _blk_col = next((c for c in mdf.columns
                                      if str(c).lower() == "block"), None)
                     if _blk_col:
-                        _bl = (_dd.groupby(_blk_col)[score_col]
-                               .agg(["mean", "size"]))
+                        _bl = _dd.groupby(_blk_col).agg(avg=(_mcol, "mean"),
+                                                        size=_mcnt)
                         _bl = _bl[_bl["size"] >= 5]
                         if len(_bl):
-                            _bl["avg"] = (_bl["mean"] * 100.0 / _oomap
-                                          if _oomap else _bl["mean"])
                             _blp = (_bl.sort_values("avg").reset_index()
                                     .rename(columns={_blk_col: "Block"}))
                             _fb = px.bar(_blp, x="avg", y="Block",
@@ -3253,9 +3599,7 @@ with tabs[9]:
                                          color="avg",
                                          color_continuous_scale="RdYlGn",
                                          height=max(220, 30 * len(_blp) + 70),
-                                         labels={"avg": "Avg "
-                                                 + ("% correct" if _oomap
-                                                    else "score")})
+                                         labels={"avg": _mttl})
                             _fb.update_layout(coloraxis_showscale=False,
                                               yaxis_title="",
                                               margin=dict(t=26, b=8),
@@ -3266,17 +3610,13 @@ with tabs[9]:
                             st.plotly_chart(_fb, width='stretch')
                     # its year trend
                     if year_col and _dd[year_col].nunique() > 1:
-                        _dt = _dd.groupby(year_col)[score_col].mean()
+                        _dt = _dd.groupby(year_col)[_mcol].mean()
                         _dtp = pd.DataFrame({
                             "Year": [f"{int(x)}-{(int(x)+1) % 100:02d}"
                                      for x in _dt.index],
-                            "avg": (_dt * 100.0 / _oomap if _oomap
-                                    else _dt).round(1).values})
+                            "avg": _dt.round(1).values})
                         _ft = px.line(_dtp, x="Year", y="avg", markers=True,
-                                      height=240,
-                                      labels={"avg": "Avg "
-                                              + ("% correct" if _oomap
-                                                 else "score")})
+                                      height=240, labels={"avg": _mttl})
                         _ft.update_traces(line_width=3, marker_size=10,
                                           line_color="#00e5ff")
                         _ft.update_layout(margin=dict(t=8, b=8),
