@@ -103,6 +103,8 @@ Score
 
 The application automatically detects compatible column names.
 
+## Use the Question map option in the left sidebar to provide the (competency mapping with the question) file for analysis.
+
 
 ---
 
