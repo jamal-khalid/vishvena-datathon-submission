@@ -1,19 +1,17 @@
 # Vishvena AI — Streamlit configuration
-# Theme matches the React app (dark data-terminal, teal/lime accents)
+# LIGHT professional theme (matches the Missions page design)
 
 [theme]
-base = "dark"
-primaryColor = "#5eead4"
-backgroundColor = "#0d1220"
-secondaryBackgroundColor = "#121a2b"
-textColor = "#e8edf7"
+base = "light"
+primaryColor = "#0F6E56"
+backgroundColor = "#f2f4f8"
+secondaryBackgroundColor = "#ffffff"
+textColor = "#1f2533"
 font = "sans serif"
 
 [server]
 port = 8501
-# Required so the app (and its file uploader) works inside the React iframe.
-# NOTE: for the datathon/local use this is fine; for production, replace with
-# proper CORS/origin configuration.
+maxUploadSize = 2000
 enableCORS = false
 enableXsrfProtection = false
 

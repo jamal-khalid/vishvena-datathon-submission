@@ -41,6 +41,101 @@ import verbalize as L_verbalize
 
 st.set_page_config(page_title="Vishvena AI — Data Studio", layout="wide")
 
+# ---------------- LIGHT THEME SKIN (matches pages/Missions design) ---------
+st.markdown("""
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+html, body, .stApp, .stApp * { font-family: 'Inter', 'Segoe UI', sans-serif; }
+span[data-testid="stIconMaterial"],
+[class*="material-symbols"], [class*="material-icons"],
+[data-testid="stExpanderToggleIcon"] {
+    font-family: 'Material Symbols Rounded', 'Material Symbols Outlined',
+                 'Material Icons' !important; }
+.stApp { background: #f2f4f8; }
+h1, h2, h3 { color: #101828 !important; font-weight: 700 !important;
+    letter-spacing: -0.3px; }
+/* ---- soft dark sidebar (Linear/Vercel style) ---- */
+[data-testid="stSidebar"] { background: #111827;
+    border-right: 1px solid #1F2937; }
+[data-testid="stSidebar"] *, [data-testid="stSidebar"] p,
+[data-testid="stSidebar"] span, [data-testid="stSidebar"] label {
+    color: #E5E7EB !important; }
+[data-testid="stSidebar"] [data-testid="stCaptionContainer"],
+[data-testid="stSidebar"] small, [data-testid="stSidebar"] .stCaption {
+    color: #9CA3AF !important; }
+[data-testid="stSidebar"] h1, [data-testid="stSidebar"] h2,
+[data-testid="stSidebar"] h3 { color: #F9FAFB !important; }
+[data-testid="stSidebar"] [data-baseweb="select"] > div,
+[data-testid="stSidebar"] input,
+[data-testid="stSidebar"] [data-testid="stNumberInputContainer"],
+[data-testid="stSidebar"] [data-baseweb="input"] {
+    background: #1F2937 !important; border-color: #374151 !important;
+    color: #E5E7EB !important; }
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] {
+    background: #1F2937 !important;
+    border: 1.5px dashed #4B5563 !important; }
+[data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] * {
+    color: #9CA3AF !important; }
+[data-testid="stSidebar"] button {
+    background: #10B981 !important; color: #06281d !important;
+    border: 0 !important; font-weight: 600 !important; }
+[data-testid="stSidebar"] button:hover { background: #0ea371 !important; }
+[data-testid="stSidebar"] [data-testid="stExpander"],
+[data-testid="stSidebar"] [data-testid="stAlert"] {
+    background: #1F2937 !important; border: 1px solid #374151 !important; }
+[data-testid="stSidebar"] [data-testid="stAlert"] * {
+    color: #E5E7EB !important; }
+[data-testid="stSidebar"] hr { border-color: #374151; }
+[data-testid="stSidebar"] a, [data-testid="stSidebarNav"] a span {
+    color: #E5E7EB !important; }
+[data-testid="stSidebar"] a:hover { color: #10B981 !important; }
+[data-testid="stSidebarNav"] { background: #111827; padding-top: 8px;
+    display: none !important; }  /* Missions page hidden from nav for now — remove this line to restore */
+[data-testid="stSidebar"] [role="radiogroup"] label,
+[data-testid="stSidebar"] [data-baseweb="checkbox"] {
+    background: transparent !important; }
+[data-testid="stVerticalBlockBorderWrapper"] {
+    background: #ffffff; border: 1px solid #e6e9ef !important;
+    border-radius: 14px;
+    box-shadow: 0 1px 3px rgba(16,24,40,.05); }
+div[data-testid="stMetric"] { background: #ffffff;
+    border: 1px solid #e6e9ef; border-top: 3px solid #0F6E56;
+    border-radius: 12px; padding: 10px 14px; min-width: 0;
+    box-shadow: 0 1px 3px rgba(16,24,40,.05); }
+div[data-testid="stMetric"] label p { color: #67707f !important;
+    font-size: 11px !important; text-transform: none;
+    letter-spacing: .2px; font-weight: 600 !important;
+    white-space: normal !important; line-height: 1.3; }
+div[data-testid="stMetricValue"],
+div[data-testid="stMetricValue"] * {
+    color: #0F6E56 !important; font-weight: 700 !important;
+    font-size: 19px !important; line-height: 1.25 !important;
+    white-space: normal !important; overflow: visible !important;
+    text-overflow: clip !important; overflow-wrap: anywhere; }
+div[data-testid="stMetricDelta"],
+div[data-testid="stMetricDelta"] * { font-size: 13px !important; }
+[data-baseweb="tab-list"] { background: #ffffff; border-radius: 12px;
+    border: 1px solid #e6e9ef; padding: 4px 8px; }
+[data-baseweb="tab-highlight"] { background: #0F6E56; }
+[data-testid="stPlotlyChart"], [data-testid="stDataFrame"] {
+    background: #ffffff; border: 1px solid #e6e9ef; border-radius: 12px;
+    padding: 4px; }
+[data-testid="stExpander"] { background: #ffffff;
+    border: 1px solid #e6e9ef !important; border-radius: 12px; }
+.stButton button, [data-testid="stFileUploader"] button {
+    background: #0F6E56 !important; color: #ffffff !important;
+    border: 0 !important; border-radius: 10px !important;
+    font-weight: 600 !important; }
+.stButton button:hover { background: #0a5340 !important; }
+[data-testid="stFileUploaderDropzone"] { background: #ffffff;
+    border: 1.5px dashed #c6cdd8 !important; border-radius: 12px; }
+[data-testid="stAlert"] { border-radius: 12px; }
+[data-testid="stHeader"] { background: #f2f4f8; }
+.stCode, pre, code { background: #f0f4f2 !important;
+    color: #0a5340 !important; border-radius: 8px !important; }
+</style>
+""", unsafe_allow_html=True)
+
 
 # ----------------------------- Data handling --------------------------------
 HIERARCHY_CANDIDATES = ["Division", "District", "Block", "Cluster"]
@@ -381,6 +476,14 @@ def normalize_dataset(df: pd.DataFrame):
 
 
 # ------------------------------- Sidebar ------------------------------------
+_SHOW_MISSIONS_LINK = False   # hidden for now — flip to True to bring the link back
+if _SHOW_MISSIONS_LINK:
+    try:
+        st.sidebar.page_link("pages/Missions.py",
+                             label="**🎯 National Missions →**")
+        st.sidebar.markdown("---")
+    except Exception:
+        pass
 st.sidebar.title("📂 Data")
 # ---- optional question map: maps Q items to named competencies -----------
 @st.cache_data(show_spinner=False)
@@ -867,6 +970,11 @@ grade_col = next((c for c in cols["categorical"]
 
 # Filters — auto-generated from hierarchy + categoricals
 st.sidebar.title("🔍 Slice & Dice")
+# ---- share with the 🎯 Missions page (pages/Missions.py) ----------------
+st.session_state["_mx_primary_df"] = df
+st.session_state["_mx_score_col"] = score_col
+st.session_state["_mx_qmap"] = QMAP if QMAP else None
+
 fdf = df.copy()
 _active_filters = {}          # reused by the analysis layers on the raw item frame
 for col in hierarchy + ([comp_col] if comp_col else []) \
@@ -1237,8 +1345,8 @@ def render_echarts_treemap(agg, hierarchy, vmin, vmax, height=650, topk=12):
             "width": "100%", "height": "92%", "top": 0,
             "roam": False, "nodeClick": "zoomToNode",
             "breadcrumb": {"show": True, "bottom": 4, "height": 24,
-                           "itemStyle": {"color": "#2a3550",
-                                         "textStyle": {"color": "#e0e6ef"}}},
+                           "itemStyle": {"color": "#e8ecf2",
+                                         "textStyle": {"color": "#26303e"}}},
             "leafDepth": 2,
             "upperLabel": {"show": True, "height": 22, "fontSize": 11,
                            "fontWeight": "bold"},
@@ -1288,8 +1396,11 @@ with tabs[0]:
         if hierarchy:
             # --- Chart type: treemap uses area (better for many small units /
             # comparing sizes); sunburst shows the ring hierarchy.
-            chart_type = st.radio("Chart type", ["🟩 Treemap", "🌞 Sunburst"],
-                                  horizontal=True, key="hier_chart_type")
+            chart_type = st.segmented_control(
+                "Chart type", ["🟩 Treemap", "🌞 Sunburst"],
+                default="🟩 Treemap", key="hier_chart_type")
+            if chart_type is None:          # user tapped the active pill off
+                chart_type = "🟩 Treemap"
             is_treemap = chart_type.endswith("Treemap")
 
             # --- Scale controls: bound what's DRAWN, not what's analyzed --------
@@ -1309,7 +1420,7 @@ with tabs[0]:
             topk = cc2.slider(_slice_word, 5, 30, 12,
                               help="Largest units shown; the rest are bundled "
                                    "into a '+N more' slice (weighted average).")
-            smooth = cc3.toggle("✨ Smooth renderer (ECharts)", value=True,
+            smooth = cc3.toggle("✨ Smooth renderer (ECharts)", value=False,
                                 help="Silkier zoom animations. Turn off for the Plotly version.")
 
             levels = hierarchy[:depth]
@@ -1573,26 +1684,26 @@ with tabs[1]:
                         "smooth": True, "symbol": "circle", "symbolSize": 9,
                         "lineStyle": {"width": 3, "color": col,
                                       "shadowBlur": 14, "shadowColor": col},
-                        "itemStyle": {"color": col, "borderColor": "#0b1035",
+                        "itemStyle": {"color": col, "borderColor": "#ffffff",
                                       "borderWidth": 2},
                         "areaStyle": {"opacity": 0.12, "color": col},
                         "emphasis": {"focus": "series",
                                      "lineStyle": {"width": 4.5}},
                     })
                 _opt = {
-                    "backgroundColor": "#0b1035",
+                    "backgroundColor": "#ffffff",
                     "grid": {"left": 48, "right": 24, "top": 36, "bottom": 56},
                     "tooltip": {"trigger": "axis"},
-                    "legend": {"bottom": 4, "textStyle": {"color": "#9aa3c7"},
+                    "legend": {"bottom": 4, "textStyle": {"color": "#67707f"},
                                "type": "scroll"},
                     "xAxis": {"type": "category",
                               "data": [_xfmt(x) for x in xs],
-                              "axisLine": {"lineStyle": {"color": "#3a4370"}},
-                              "axisLabel": {"color": "#9aa3c7"}},
+                              "axisLine": {"lineStyle": {"color": "#c9d0da"}},
+                              "axisLabel": {"color": "#67707f"}},
                     "yAxis": {"type": "value", "name": _ylab, "scale": True,
-                              "nameTextStyle": {"color": "#9aa3c7"},
-                              "splitLine": {"lineStyle": {"color": "rgba(120,130,180,.18)"}},
-                              "axisLabel": {"color": "#9aa3c7"}},
+                              "nameTextStyle": {"color": "#67707f"},
+                              "splitLine": {"lineStyle": {"color": "rgba(60,70,90,.12)"}},
+                              "axisLabel": {"color": "#67707f"}},
                     "series": series,
                     "animationDuration": 800, "animationEasing": "cubicOut",
                 }
@@ -1656,9 +1767,9 @@ with tabs[1]:
                 figd.update_traces(hovertemplate="<b>%{y}</b><br>%{x:+.1f} pts "
                                    "change in " + _ylab + "<extra></extra>")
                 _avg_d = float(_d.mean())
-                figd.add_vline(x=_avg_d, line_dash="dot", line_color="#9aa3c7",
+                figd.add_vline(x=_avg_d, line_dash="dot", line_color="#67707f",
                                annotation_text=f"typical change {_avg_d:+.1f}",
-                               annotation_font_color="#9aa3c7")
+                               annotation_font_color="#67707f")
                 figd.update_layout(coloraxis_showscale=False,
                                    yaxis_title="", margin=dict(t=10, b=10))
                 st.plotly_chart(figd, width='stretch')
@@ -1853,7 +1964,7 @@ with tabs[2]:
                             f"bigger than chance would explain — the rest "
                             f"are drawn in grey and should not be acted on.")
 
-                        PINK, BLUE, GREY = "#ff2d78", "#00b4d8", "#9aa4b2"
+                        PINK, BLUE, GREY = "#ff2d78", "#00b4d8", "#67707f"
                         figd = go.Figure()
                         for _real, _clr, _nm in ((True, "#ffb703", "Real difference"),
                                                  (False, GREY, "Within chance")):
@@ -2140,20 +2251,20 @@ with tabs[3]:
                                        "borderRadius": [6, 6, 0, 0]}}
                         for i, (_, r) in enumerate(comp.iterrows())]
             _optb = {
-                "backgroundColor": "#0b1035",
+                "backgroundColor": "#ffffff",
                 "grid": {"left": 16, "right": 16, "top": 30, "bottom": 40},
                 "tooltip": {"trigger": "item",
                             "formatter": "{b}: {c}"},
                 "xAxis": {"type": "category",
                           "data": comp[comp_col].astype(str).str.upper().tolist(),
                           "axisLine": {"show": False}, "axisTick": {"show": False},
-                          "axisLabel": {"color": "#cdd3f7", "fontWeight": "bold",
+                          "axisLabel": {"color": "#26303e", "fontWeight": "bold",
                                         "fontSize": 11}},
                 "yAxis": {"show": False},
                 "series": [{
                     "type": "bar", "data": bar_data, "barWidth": "62%",
                     "label": {"show": True, "position": "inside",
-                              "color": "#0b1035", "fontWeight": "bold",
+                              "color": "#26303e", "fontWeight": "bold",
                               "fontSize": 14, "formatter": "{c}"},
                     "emphasis": {"itemStyle": {"shadowBlur": 16,
                                                "shadowColor": "rgba(255,255,255,.35)"}},
@@ -2307,7 +2418,7 @@ with tabs[3]:
                 _opt = {
                     "tooltip": {"trigger": "item",
                                 "formatter": "{b}: {c} ({d}%)"},
-                    "legend": {"bottom": 0, "textStyle": {"color": "#bbb"}},
+                    "legend": {"bottom": 0, "textStyle": {"color": "#67707f"}},
                     "series": [{
                         "type": "pie", "radius": ["42%", "72%"],
                         "center": ["50%", "46%"],
@@ -2381,11 +2492,11 @@ with tabs[3]:
                                texttemplate="%{percent:.1%}",
                                hovertemplate="%{label}: %{percent:.1%} of all "
                                "students (%{value:,})<extra></extra>",
-                               marker=dict(line=dict(color="#0b1035", width=2)))
+                               marker=dict(line=dict(color="#ffffff", width=2)))
             figp.update_layout(margin=dict(t=24, b=8, l=8, r=8),
                                legend=dict(orientation="h", y=-0.08),
                                paper_bgcolor="rgba(0,0,0,0)",
-                               font=dict(color="#cdd3f7"))
+                               font=dict(color="#26303e"))
             st.plotly_chart(figp, width='stretch')
 
         # ---- stacked bar: mastery mix per grade -------------------------
@@ -2407,7 +2518,7 @@ with tabs[3]:
                                    margin=dict(t=24, b=8, l=8, r=8),
                                    legend=dict(orientation="h", y=-0.14),
                                    paper_bgcolor="rgba(0,0,0,0)",
-                                   font=dict(color="#cdd3f7"))
+                                   font=dict(color="#26303e"))
                 st.plotly_chart(figs, width='stretch')
                 st.caption("**How to read:** each column = 100% of that "
                            "grade's students, sliced by their own score. "
@@ -2435,7 +2546,7 @@ with tabs[3]:
                                margin=dict(t=8, b=8, l=8, r=8),
                                legend=dict(orientation="h", y=-0.2),
                                paper_bgcolor="rgba(0,0,0,0)",
-                               font=dict(color="#cdd3f7"))
+                               font=dict(color="#26303e"))
             st.plotly_chart(figt, width='stretch')
             st.caption("**How to read:** each column = one year, all "
                        "students sliced by score band. Orange shrinking + "
@@ -2471,7 +2582,7 @@ with tabs[3]:
                                 "answer correctly<extra></extra>")
             fighm.update_layout(margin=dict(t=8, b=8, l=8, r=8),
                                 paper_bgcolor="rgba(0,0,0,0)",
-                                font=dict(color="#cdd3f7"),
+                                font=dict(color="#26303e"),
                                 coloraxis_showscale=False)
             st.plotly_chart(fighm, width='stretch')
             st.caption("**How to read:** columns = test questions, rows = "
@@ -2560,7 +2671,7 @@ with tabs[4]:
                     fighd.update_layout(margin=dict(t=28, b=8),
                                         yaxis_title="Students",
                                         paper_bgcolor="rgba(0,0,0,0)",
-                                        font=dict(color="#cdd3f7"),
+                                        font=dict(color="#26303e"),
                                         title=f"Score distribution — {dunit}")
                     st.plotly_chart(fighd, width='stretch')
                 with dc2:
@@ -2588,7 +2699,7 @@ with tabs[4]:
                         figdq.update_layout(coloraxis_showscale=False,
                                             margin=dict(t=28, b=8),
                                             paper_bgcolor="rgba(0,0,0,0)",
-                                            font=dict(color="#cdd3f7"),
+                                            font=dict(color="#26303e"),
                                             title=f"Weakest {_dd_by.lower()}s "
                                                   f"vs overall")
                         if _worst_gap > -1.0:
@@ -2621,7 +2732,7 @@ with tabs[4]:
                                             "<extra></extra>")
                         figtr.update_layout(margin=dict(t=40, b=8),
                                             paper_bgcolor="rgba(0,0,0,0)",
-                                            font=dict(color="#cdd3f7"))
+                                            font=dict(color="#26303e"))
                         st.plotly_chart(figtr, width='stretch')
                         _t0, _t1v = _trd[_dlab].iloc[0], _trd[_dlab].iloc[-1]
                         st.caption(f"**{dunit} over time:** {_t0:.1f} → "
@@ -2668,7 +2779,7 @@ with tabs[4]:
                 figeq.update_layout(coloraxis_showscale=False,
                                     margin=dict(t=10, b=8),
                                     paper_bgcolor="rgba(0,0,0,0)",
-                                    font=dict(color="#cdd3f7"))
+                                    font=dict(color="#26303e"))
                 st.plotly_chart(figeq, width='stretch')
                 st.caption("**How to read:** each dot = one unit; dot size = "
                            "students. Right = better average. Higher = bigger "
@@ -2927,7 +3038,7 @@ with tabs[5]:
                 _mvdf = pd.DataFrame({
                     "outcome": ["Fell back", "Stayed the same", "Moved up"],
                     "children": [_dn, _sm, _up],
-                    "color": ["#d73027", "#9aa4b2", "#1a9850"]})
+                    "color": ["#d73027", "#67707f", "#1a9850"]})
                 figs2 = px.bar(_mvdf, x="children", y="outcome", orientation="h",
                                height=260, text="children")
                 figs2.update_traces(
@@ -3239,10 +3350,10 @@ with tabs[8]:
                 figq.update_traces(textposition="top center", marker_size=11)
                 figq.add_hline(y=0.2, line_dash="dash", line_color="gray",
                                annotation_text="0.2 = review threshold",
-                               annotation_font_color="#9aa3c7")
+                               annotation_font_color="#67707f")
                 figq.update_layout(margin=dict(t=10, b=10), legend_title="",
                                    paper_bgcolor="rgba(0,0,0,0)",
-                                   font=dict(color="#cdd3f7"))
+                                   font=dict(color="#26303e"))
                 st.plotly_chart(figq, width='stretch')
 
                 _bad = _qual[_qual["flag"] != "ok"]["Item"].tolist()
@@ -3287,7 +3398,7 @@ with tabs[8]:
                                         "%{y:.0f}% wrong<extra></extra>")
                     figdo.update_layout(margin=dict(t=10, b=10),
                                         paper_bgcolor="rgba(0,0,0,0)",
-                                        font=dict(color="#cdd3f7"))
+                                        font=dict(color="#26303e"))
                     st.plotly_chart(figdo, width='stretch')
                     st.caption("**How to read:** each dot = one question; "
                                "across = how hard the designers *intended* it "
@@ -3452,7 +3563,7 @@ with tabs[9]:
                                  bgcolor="rgba(0,0,0,0)")
                 figm.update_layout(margin=dict(t=10, b=10, l=10, r=10),
                                    paper_bgcolor="rgba(0,0,0,0)",
-                                   font=dict(color="#e0e6ef"))
+                                   font=dict(color="#26303e"))
                 _ev = st.plotly_chart(figm, width='stretch',
                                       on_select="rerun",
                                       selection_mode="points",
@@ -3573,7 +3684,7 @@ with tabs[9]:
                         _fs.update_layout(coloraxis_showscale=False,
                                           margin=dict(t=30, b=8),
                                           paper_bgcolor="rgba(0,0,0,0)",
-                                          font=dict(color="#cdd3f7"),
+                                          font=dict(color="#26303e"),
                                           title=f"{_dname} by "
                                                 f"{_mby.lower()} — where it "
                                                 f"is ahead and behind")
@@ -3604,7 +3715,7 @@ with tabs[9]:
                                               yaxis_title="",
                                               margin=dict(t=26, b=8),
                                               paper_bgcolor="rgba(0,0,0,0)",
-                                              font=dict(color="#cdd3f7"),
+                                              font=dict(color="#26303e"),
                                               title="Blocks inside "
                                                     f"{_dname}")
                             st.plotly_chart(_fb, width='stretch')
@@ -3621,7 +3732,7 @@ with tabs[9]:
                                           line_color="#00e5ff")
                         _ft.update_layout(margin=dict(t=8, b=8),
                                           paper_bgcolor="rgba(0,0,0,0)",
-                                          font=dict(color="#cdd3f7"))
+                                          font=dict(color="#26303e"))
                         st.plotly_chart(_ft, width='stretch')
                     st.caption("Click a different district on the map above to "
                                "switch, or double-click empty space to clear.")
@@ -4075,6 +4186,16 @@ with tabs[17]:
             _p = os.path.join(_sec_dir, _sec_pick)
             _sec_df = (pd.read_csv(_p) if _p.lower().endswith(".csv")
                        else pd.read_excel(_p))
+        else:
+            # PRE-LOADED default: the fixed secondary dataset ships with the
+            # app and never changes — no upload needed. The uploader above
+            # remains as an override only.
+            _default_sec = os.path.join(_HERE, "secondary_dataset.xlsx")
+            if os.path.exists(_default_sec):
+                _sec_df = pd.read_excel(_default_sec)
+                st.success("📎 Using the built-in secondary dataset "
+                           "(secondary_dataset.xlsx) — upload a file above "
+                           "only to override it.")
 
         if _sec_df is None:
             st.info("⬆️ Upload a district-level context file to run the analysis.")
