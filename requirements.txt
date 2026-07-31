@@ -1,0 +1,14 @@
+# >=1.37 is required: the dashboard uses @st.fragment, which was experimental
+# (st.experimental_fragment) until 1.37. On 1.32-1.36 the app dies at startup
+# with AttributeError.
+streamlit>=1.37
+duckdb>=0.10
+pandas>=2.0
+numpy>=1.24
+scikit-learn>=1.3
+plotly>=5.18
+pyarrow>=14.0
+openpyxl>=3.1
+# Rust .xlsx reader: 7-12x faster than openpyxl on the real dataset, identical
+# output. The loader falls back to openpyxl automatically if it is absent.
+python-calamine>=0.2

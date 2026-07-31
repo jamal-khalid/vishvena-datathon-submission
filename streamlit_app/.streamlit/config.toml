@@ -1,0 +1,21 @@
+# Vishvena AI — Streamlit configuration
+# Theme matches the React app (dark data-terminal, teal/lime accents)
+
+[theme]
+base = "dark"
+primaryColor = "#5eead4"
+backgroundColor = "#0d1220"
+secondaryBackgroundColor = "#121a2b"
+textColor = "#e8edf7"
+font = "sans serif"
+
+[server]
+port = 8501
+# Required so the app (and its file uploader) works inside the React iframe.
+# NOTE: for the datathon/local use this is fine; for production, replace with
+# proper CORS/origin configuration.
+enableCORS = false
+enableXsrfProtection = false
+
+[browser]
+gatherUsageStats = false

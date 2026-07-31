@@ -1,0 +1,9 @@
+streamlit>=1.37          # @st.fragment is only stable from 1.37
+pandas
+numpy
+plotly
+openpyxl
+python-calamine
+scikit-learn
+duckdb
+pyarrow
