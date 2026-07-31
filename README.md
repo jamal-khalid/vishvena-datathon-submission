@@ -1,156 +1,123 @@
-# Datathon 2026 — Analysis Pipeline + Dashboard
+# Vishvena AI — Data Studio (Streamlit)
 
-Reimagining Learning Outcomes Through Analytics — Akshara Foundation.
-
-**No LLM or generative AI is used anywhere.** Every number comes from a
-deterministic computation, so the same input always produces the same output.
-That is a hard competition rule, not a preference.
-
----
-
-## Run it
-
-```bash
-pip install -r requirements.txt
-cd streamlit_app
-streamlit run streamlit_app.py
-```
-
-Then either upload a dataset, or pick `DATATHON_TEST_1K.xlsx` from the
-"load files already on disk" box.
-
-> `DATATHON_TEST_1K.xlsx` is a 1,000-row sample so the app runs out of the box.
-> It is **too small for real conclusions** — see "Group sizes" below.
+Education-assessment dashboard: upload the student dataset in the sidebar →
+auto column detection, filters, hierarchy treemap/sunburst, trends & cohort
+analysis, gender gap, mastery bands, deep-dive report cards, rankings,
+forecasts, Karnataka choropleth with click-to-drill, item analysis, and the
+AI insight / action-plan / brief tabs.
 
 ---
 
-## What is where
+## 1. Setup (first time only)
 
-### Analysis layers (project root)
+Requires **Python 3.10+** (3.12 recommended).
 
-| File | What it does |
+### Windows (PowerShell or CMD)
+
+    cd datathon_share\streamlit_app
+
+    :: create a virtual environment
+    python -m venv venv
+
+    :: activate it  (PowerShell)
+    venv\Scripts\Activate.ps1
+    :: ...or (CMD)
+    venv\Scripts\activate.bat
+
+    :: install all dependencies
+    pip install -r requirements.txt
+
+> PowerShell blocks activation? Run once:
+> `Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser`
+
+### macOS / Linux
+
+    cd datathon_share/streamlit_app
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install -r requirements.txt
+
+You know the venv is active when the prompt starts with `(venv)`.
+Every later session: just re-run the **activate** line, nothing else.
+
+---
+
+## 2. Run
+
+    streamlit run streamlit_app.py
+
+Opens at **http://localhost:8501**.
+
+Files that must sit in this folder (all included):
+
+| File | Purpose |
 |---|---|
-| `units.py` | **Read this first.** The response-vs-child rule. Getting it wrong inflates every headcount 20×. |
-| `stats_tests.py` | z-test, Fisher's exact, Cohen's h. No scipy — pure `math`. |
-| `verbalize.py` | Layer 1 — turns aggregated rows into sentences (templates, not a model). |
-| `insights.py` | Layer 4 — 11 finding generators, each traced to a handbook question. |
-| `competency.py` | Layer 5 — per-competency report (overview, gender, grade, geography, trend, risk). |
-| `brief.py` | Layer 7 — role-based narrative briefs for block / district / policy readers. |
-| `playbook.py` | Layer 8 — recommendation engine. 9 base actions × 6 modifiers = 576 combinations. |
-| `models_ml.py` | Clustering, improvement benchmarks, What-If, and the early-warning model. |
-| `charts.py` | Plotly figures shared by both apps. |
-| `analytics.py` | DuckDB CSV→Parquet aggregation for the older standalone app. |
-| `gen_data.py` | Generates synthetic test data so you can work without the real dataset. |
-| `app.py` | Standalone explainer app — walks through each layer. The dashboard below is the real deliverable. |
+| `streamlit_app.py` | the dashboard |
+| `adapter.py` | data → analysis-layer bridge (**must match the app version — see Troubleshooting**) |
+| `echarts.min.js` | offline smooth-animation charts |
+| `karnataka_districts.geojson` | 31-district Karnataka map boundaries |
+| `DATATHON_QUESTION_MAP.csv` | optional question → competency map (auto-loaded) |
+| `.streamlit/config.toml` | dark theme, iframe flags, 2 GB upload limit |
+| `../` (parent folder) | analysis layer: `analytics.py`, `insights.py`, `models_ml.py`, … |
 
-### Dashboard (`streamlit_app/`)
+---
 
-| File | What it does |
+## 3. Feed it data
+
+**In the sidebar:**
+
+1. **📂 Upload dataset** — `.xlsx`, `.csv`, or `.parquet`
+   (expected shape: `Year | Grade | Division | District | Block | Cluster |
+   GP | Gender | Q1..Q20 | Score`; the adapter auto-detects variations).
+2. **🗺️ Question map (optional CSV)** — columns `question, competency`
+   (difficulty optional). Groups Q1..Q20 into named skills (Numeracy,
+   Algebra, …) across the whole dashboard **including** the AI tabs.
+   *You usually don't need to upload it*: if `DATATHON_QUESTION_MAP.csv`
+   sits next to the app it loads automatically — the sidebar shows
+   "🗺️ Question map: 20 items → 6 competencies". Uploading a file
+   overrides the local one. No map = per-question analysis (still works).
+3. **🔬 Min students per group** (default 15) — charts hide groups smaller
+   than this so tiny samples can't fake results. Drop to **5** when using
+   the 1K sample file; leave at 15 for the real dataset.
+
+**Big files:** convert once, upload the parquet — loads in seconds:
+
+    python convert_to_parquet.py YOUR_BIG_FILE.xlsx
+
+---
+
+## 4. Test data
+
+    python generate_sample_data.py
+
+creates a sample dataset. A pre-generated 1K-row copy with realistic
+planted patterns (weak districts, skill-specific gender gaps, grade
+progression, declining blocks) is the recommended demo file. Remember to
+set Min students → 5 for it.
+
+---
+
+## 5. Troubleshooting
+
+| Symptom | Fix |
 |---|---|
-| `streamlit_app.py` | The 17-tab dashboard. Also holds the multi-file loader. |
-| `adapter.py` | Bridges any incoming file shape → the schema the layers expect. |
-| `karnataka_districts.geojson` | Map boundaries. |
-| `echarts.min.js` | Vendored so the app makes **zero network calls**. |
-| `.streamlit/config.toml` | Theme. Keep it — the app is styled around it. |
+| `TypeError: build_agg() got an unexpected keyword argument 'qmap'` | Your `adapter.py` is older than `streamlit_app.py`. Replace `adapter.py` in **this** folder with the matching version, then restart Streamlit. They ship as a pair. |
+| `ModuleNotFoundError: duckdb` (or plotly, sklearn, …) | The venv isn't active or requirements weren't installed **inside** it: activate the venv, then `pip install -r requirements.txt`. |
+| Upload stuck / very slow | Excel parsing is slow at scale — use `convert_to_parquet.py` and upload the `.parquet`. Upload limit is already raised to 2 GB in config. |
+| Map tab: "geojson not found" | `karnataka_districts.geojson` must sit next to `streamlit_app.py`, exact filename. |
+| Charts look empty on the 1K sample | Sidebar → Min students per group → 5. |
+| Everything one flat color / "no gap" everywhere | That's the data, not the app — uniform generated data has no group differences. Use the planted-pattern sample or real data. |
+| Port already in use | `streamlit run streamlit_app.py --server.port 8502` |
 
 ---
 
-## Three things that will bite you if you don't know them
+## 6. requirements.txt (what's in it and why)
 
-### 1. `units.py` — responses vs children
-
-When the 20 question columns become the competency dimension, **one child
-produces 20 rows**. So `agg["n"].sum()` across competencies counts every child
-20 times.
-
-```python
-n         -> assessment responses -> correct denominator for a PERCENTAGE
-students  -> distinct children    -> correct denominator for a HEADCOUNT / Z-TEST
-```
-
-Percentages are unaffected (the factor cancels in a weighted mean). Headcounts
-and significance tests are not. This bug was live and had the policy brief
-reporting *"6,420 assessed children"* when there were **321**.
-
-**Use `units.headcount(rows)` for any child count. Never `rows["n"].sum()`.**
-
-### 2. Significance needs the right test
-
-The 20 answers from one child are **one child measured 20 times**, not 20
-independent observations. Feeding response counts to a z-test shrinks the
-standard error by √20 and turns p=0.35 into p<0.0001.
-
-Also, a z-test needs ~5 expected observations per cell. On small groups it is
-invalid. `stats_tests.proportion_test()` picks z or Fisher's exact
-automatically — **use it instead of calling `two_proportion_z` directly.**
-
-Fixing this removed **94% of previously "significant" gender gaps** (208 → 12).
-They were noise.
-
-### 3. Group sizes decide whether anything is trustworthy
-
-On the 1K sample, the median group is 2–6 students, so an 80-point "gender gap"
-is three girls. The sidebar has **"Ignore groups smaller than"** — raise it on
-real data. On the full 1.6M-row dataset the median group is ~2,280 students and
-everything becomes reliable.
-
----
-
-## Loading data
-
-Excel caps a sheet at **1,048,576 rows**, so a full dataset arrives split. The
-loader takes **multiple files or a `.zip`**, and reads `.xlsx / .xls / .csv /
-.parquet`. Parts are concatenated *before* any analysis, so every layer sees the
-whole dataset.
-
-- Subfolders appear in the disk picker, and a whole folder can be selected at once
-- A corrupt part is reported and skipped; the rest still load
-- Parts with a missing optional column merge on the union of columns
-- Genuine overlap between parts is detected and flagged
-- The combined result is cached as Parquet next to the files
-
-**Performance on the real 1.6M-row dataset (2 Excel parts):**
-
-```
-cold first run   49.3 s     (read 40.6s + aggregate 4.0s + layers 4.6s)
-warm run          0.54 s    (Parquet cache, 75x)
-```
-
-`.xlsx` is read with `python-calamine` (Rust), ~8× faster than openpyxl with
-byte-identical output. If that package is missing it falls back to openpyxl
-automatically — slower, but it still runs.
-
-> Don't add parallel reading. I measured it: 72s vs 54s sequential. Process
-> spawn plus shipping frames back costs more than the parse saves.
-
----
-
-## Verifying you haven't broken anything
-
-The aggregation is cross-checked against a hand computation in plain pandas.
-The invariant to preserve:
-
-```
-max |below_pct difference| = 0.0000
-agg["n"].sum() == raw_rows × n_questions
-units.headcount(year_rows) == distinct children that year
-```
-
----
-
-## Still open
-
-| Item | Why it matters |
-|---|---|
-| **Map** — 0 of 31 districts match the GeoJSON | Needs a real Karnataka spelling map (Bengaluru/Bangalore, Kalaburagi/Gulbarga, Mysuru/Mysore, Vijayapura/Bijapur, Shivamogga/Shimoga, Tumakuru/Tumkur, plus Vijayanagara split from Ballari in 2021) |
-| **Cross-dataset analysis** — not started | 15% of the total score |
-| **`run_all.py` + `outputs/` + `manifest.yml` + `claims.json`** | Required submission shape; must rebuild offline in ~3 min |
-| **Layer 4 scoring** mixes units | `yoy×5`, `z×10` etc. — ranking across finding *types* isn't meaningful |
-| **Prediction tab** extrapolates from 2 points | Warned in-app. The early-warning model in `models_ml.py` is the sound one. |
-
-## Also
-
-- **Rotate the hardcoded Groq API key** in the other backend
-  (`main/data_thon/app/utils.py:7`) — it is live and in source.
-- `llm.py` was **deliberately left out**. It was dead code, but the rules ban
-  LLMs including local ones and the repo is public during judging.
+    streamlit>=1.37     # @st.fragment needs >=1.37
+    pandas / numpy      # data handling
+    plotly              # charts
+    openpyxl            # .xlsx reading
+    python-calamine     # 7-12x faster Excel reader (auto fallback to openpyxl)
+    scikit-learn        # early-warning model, clustering
+    duckdb              # streaming unpivot of 20 items at 2M-row scale
+    pyarrow             # .parquet support
