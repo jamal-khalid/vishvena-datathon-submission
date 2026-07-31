@@ -2,6 +2,7 @@
 Layer 5 — visualisation (was skipped; it is 15% of the Datathon score).
 Plotly only: the handbook bans Tableau/Power BI and requires code-based charts.
 """
+import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
@@ -377,4 +378,116 @@ def whatif_children(before_pct, students, scenarios):
         yaxis_title="",
         legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0),
         bargap=0.35)
+    return fig
+
+
+# ---------------------------------------------------------------------------
+# Cross-dataset charts. These exist to make the STATISTICS visible, not just
+# the numbers — a reader who does not know what a p-value is can still see
+# "the bar crosses zero" or "every bar is inside the grey band".
+# ---------------------------------------------------------------------------
+
+def effect_forest(table, crit=None, top=14, title=None):
+    """
+    Forest plot: each indicator's correlation with its 95% confidence interval.
+
+    This is the whole argument in one picture:
+      * the DOT is how strong the relationship looks
+      * the BAR is how uncertain that is
+      * the vertical line at 0 is "no relationship at all"
+      * a bar crossing 0 means we cannot even be sure of the DIRECTION
+      * the grey band is the detection floor — inside it, nothing can be
+        distinguished from zero no matter what the dot says
+
+    A plain bar chart of r hides all of that and invites over-reading.
+    """
+    if table is None or len(table) == 0:
+        return None
+    d = table.copy()
+    d = d[d["r"].notna()]
+    if d.empty:
+        return None
+    d = d.reindex(d["r"].abs().sort_values(ascending=True).index).tail(top)
+
+    sig = d["verdict"].astype(str).str.startswith("significant") \
+        if "verdict" in d.columns else pd.Series(False, index=d.index)
+
+    fig = go.Figure()
+    if crit and crit == crit:
+        fig.add_vrect(x0=-crit, x1=crit, fillcolor="#8892b0", opacity=0.13,
+                      line_width=0,
+                      annotation_text=f"cannot be detected (|r| < {crit:.2f})",
+                      annotation_position="top left",
+                      annotation_font_size=11)
+    for lbl, mask, colour in (("Real relationship", sig, "#27ae60"),
+                              ("Not distinguishable from zero", ~sig, "#9aa4b2")):
+        sub = d[mask]
+        if sub.empty:
+            continue
+        xs, ys = [], []
+        for r in sub.itertuples():
+            xs += [r.ci_low, r.ci_high, None]
+            ys += [r.variable, r.variable, None]
+        fig.add_trace(go.Scatter(x=xs, y=ys, mode="lines", name=lbl,
+                                 line=dict(color=colour, width=6),
+                                 opacity=0.45, hoverinfo="skip"))
+        fig.add_trace(go.Scatter(
+            x=sub["r"], y=sub["variable"], mode="markers", showlegend=False,
+            marker=dict(color=colour, size=13,
+                        line=dict(color="white", width=1.5)),
+            customdata=np.stack([sub["ci_low"], sub["ci_high"],
+                                 sub.get("p_adj", sub["r"] * 0)], axis=-1),
+            hovertemplate="<b>%{y}</b><br>r = %{x:+.3f}"
+                          "<br>95%% range %{customdata[0]:+.2f} to "
+                          "%{customdata[1]:+.2f}"
+                          "<br>corrected p = %{customdata[2]:.3f}<extra></extra>"))
+    fig.add_vline(x=0, line_color="#e74c3c", line_dash="dash",
+                  annotation_text="no relationship", annotation_position="top")
+    fig.update_layout(
+        title=title or "How strong is each link — and how sure are we?",
+        xaxis_title="correlation with % below grade level  "
+                    "(← more of it = fewer children behind)",
+        yaxis_title="", height=max(340, 30 * len(d) + 140),
+        margin=dict(t=60, b=10, l=10, r=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
+    return fig
+
+
+def relationship_scatter(df, xcol, ycol, label_col=None, r=None, p=None):
+    """
+    One indicator against the outcome, with the fitted line.
+
+    The forest plot says how strong; this says what that strength LOOKS like.
+    r = -0.34 is abstract until you see the cloud of districts and the line
+    sloping through it.
+    """
+    d = df[[c for c in (xcol, ycol, label_col) if c]].dropna()
+    if len(d) < 3:
+        return None
+    x = pd.to_numeric(d[xcol], errors="coerce")
+    y = pd.to_numeric(d[ycol], errors="coerce")
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(
+        x=x, y=y, mode="markers",
+        marker=dict(size=13, color=y, colorscale="RdYlGn_r", showscale=False,
+                    line=dict(color="white", width=1)),
+        text=d[label_col] if label_col else None,
+        hovertemplate=("<b>%{text}</b><br>" if label_col else "")
+                      + f"{xcol}: %{{x:,.0f}}<br>{ycol}: %{{y:.1f}}%"
+                        "<extra></extra>",
+        name="districts"))
+    if x.std() > 0:
+        b, a = np.polyfit(x, y, 1)
+        xs = np.linspace(x.min(), x.max(), 50)
+        fig.add_trace(go.Scatter(x=xs, y=b * xs + a, mode="lines",
+                                 line=dict(color="#5eead4", width=3, dash="dot"),
+                                 name="trend", hoverinfo="skip"))
+    sub = ""
+    if r is not None:
+        sub = f"   (r = {r:+.2f}" + (f", p = {p:.3f})" if p is not None else ")")
+    fig.update_layout(
+        title=f"{xcol} vs children below grade level{sub}",
+        xaxis_title=xcol, yaxis_title="% below grade level",
+        height=420, margin=dict(t=60, b=10, l=10, r=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0))
     return fig

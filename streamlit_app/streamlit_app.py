@@ -35,6 +35,7 @@ import brief as L_brief
 import competency as L_competency
 import models_ml as L_models
 import charts as L_charts
+import secondary as L_secondary          # <-- ADDED: cross-dataset layer
 from stats_tests import proportion_test
 import verbalize as L_verbalize
 
@@ -148,15 +149,37 @@ def load_many(_sources, sig):
     if len(frames) == 1:
         df = frames[0]
     else:
+        # Not every file in a folder or zip is a PART of the dataset. A zip of
+        # assessment data often also carries a lookup table — a question map, a
+        # district key — and concatenating a 20-row lookup onto a million rows
+        # of results silently invents columns that are almost entirely null,
+        # which then get auto-detected as real dimensions further down.
+        # A genuine part shares most of its columns with the main table.
+        ok_rows = [r for r in manifest if r["status"] == "✅ loaded"]
+        main = max(frames, key=len)
+        main_cols = set(main.columns)
+        keep, kept_rows = [], []
+        for m, f in zip(ok_rows, frames):
+            share = len(set(f.columns) & main_cols) / max(len(f.columns), 1)
+            if f is main or share >= 0.5:
+                keep.append(f)
+                kept_rows.append(m)
+            else:
+                m["status"] = (f"↩️ not part of the dataset — shares only "
+                               f"{share:.0%} of its columns; treated as a "
+                               f"lookup table and excluded")
+        frames = keep
+
         # Align on the union of columns so a part missing an optional column
         # still contributes its rows (the gap becomes NaN, not a dropped file).
         all_cols = list(dict.fromkeys(c for f in frames for c in f.columns))
-        for m, f in zip([r for r in manifest if r["status"] == "✅ loaded"], frames):
+        for m, f in zip(kept_rows, frames):
             missing = [c for c in all_cols if c not in f.columns]
             if missing:
                 m["status"] = f"⚠️ loaded, missing {len(missing)}: {', '.join(missing[:4])}"
-        df = pd.concat([f.reindex(columns=all_cols) for f in frames],
-                       ignore_index=True, sort=False)
+        df = (frames[0] if len(frames) == 1 else
+              pd.concat([f.reindex(columns=all_cols) for f in frames],
+                        ignore_index=True, sort=False))
 
     return df, manifest
 
@@ -740,7 +763,8 @@ tabs = st.tabs(["🌞 Hierarchy", "📈 Trends", "⚖️ Gender Gap", "🎯 Comp
                 "🔬 Deep Dive", "🚨 Rankings & Alerts", "🔮 Prediction",
                 "🗂️ Data", "🧩 Item Analysis", "🗺️ Map",
                 "📄 Facts & Health", "🧠 Insights", "📋 Action Plan", "📝 Briefs",
-                "🎓 Competency Report", "🎛️ What-If", "🧬 Archetypes & Risk"])
+                "🎓 Competency Report", "🎛️ What-If", "🧬 Archetypes & Risk",
+                "🔗 Cross-dataset"])          # <-- ADDED: tabs[17]
 
 # ---------------------------------------------------------------------------
 #  Analysis layers — shared aggregate, built once from the current selection
@@ -1572,18 +1596,25 @@ with tabs[2]:
                     if not (comp_col and comp_col in _gg.columns):
                         st.info("Needs a competency column to break skills down.")
                     else:
-                        _st = (_gg.groupby([comp_col, "_g"])[COMP_VALUE_COL]
-                               .agg(mean="mean", n="size").unstack())
-                        if not {"Female", "Male"}.issubset(
-                                _st["mean"].columns.tolist()):
+                        # Two plain unstacks rather than one named aggregation:
+                        # .agg(mean=..., n=...).unstack() builds a MultiIndex
+                        # whose level order depends on the data, and blew up
+                        # with KeyError('mean') when a stray lookup table left
+                        # the competency column almost entirely null.
+                        _gb = _gg.groupby([comp_col, "_g"])[COMP_VALUE_COL]
+                        _mean = _gb.mean().unstack()
+                        _cnt = _gb.size().unstack()
+                        _have = set(map(str, _mean.columns))
+                        if not {"Female", "Male"}.issubset(_have) or _mean.empty:
                             st.info("Need both girls and boys present to compare.")
                         else:
                             dd = pd.DataFrame({
-                                "skill": _st.index.astype(str),
-                                "girls": _st[("mean", "Female")].to_numpy(float),
-                                "boys":  _st[("mean", "Male")].to_numpy(float),
-                                "ng":    _st[("n", "Female")].to_numpy(float),
-                                "nb":    _st[("n", "Male")].to_numpy(float)})
+                                "skill": _mean.index.astype(str),
+                                "girls": _mean["Female"].to_numpy(float),
+                                "boys":  _mean["Male"].to_numpy(float),
+                                "ng":    _cnt["Female"].to_numpy(float),
+                                "nb":    _cnt["Male"].to_numpy(float)})
+                            dd = dd.dropna(subset=["girls", "boys"])
                             if not COMP_VALUE_IS_PCT:
                                 dd["girls"] = _pctg(dd["girls"])
                                 dd["boys"] = _pctg(dd["boys"])
@@ -3663,3 +3694,185 @@ with tabs[16]:
                         "while using `below_pct` as an input — circular, and it only "
                         "restated the present. This one predicts a different year.")
     _tab16_fragment()
+
+# ============================================================================
+#  Tab 17 — Cross-dataset: assessment outcomes x district context
+#  ADDED by the analysis-layer work. Self-contained: reads AGG plus one
+#  uploaded district-level file, calls secondary.py, renders. It does not
+#  modify anything above this line.
+# ============================================================================
+with tabs[17]:
+    @st.fragment
+    def _tab17_fragment():
+        st.subheader("🔗 Cross-dataset — does district context explain results?")
+
+        if _needs_agg():
+            return
+
+        # ---- pick the context file --------------------------------------
+        _sec_dir = os.path.dirname(_HERE)
+        _sec_local = [f for f in _scan_local(_sec_dir)
+                      if any(k in f.lower() for k in
+                             ("secondary", "context", "district", "census",
+                              "merged"))]
+        c1, c2 = st.columns([1.2, 1])
+        with c1:
+            _sec_up = st.file_uploader(
+                "District context file (one row per district)",
+                type=["xlsx", "xls", "csv"], key="xds_up",
+                help="Needs a District column plus numeric indicators — "
+                     "income, literacy, teacher counts, libraries…")
+        with c2:
+            _sec_pick = st.selectbox("…or one already on disk",
+                                     ["(none)"] + _sec_local, key="xds_local")
+
+        _sec_df = None
+        if _sec_up is not None:
+            _sec_df = (pd.read_csv(_sec_up)
+                       if _sec_up.name.lower().endswith(".csv")
+                       else pd.read_excel(_sec_up))
+        elif _sec_pick != "(none)":
+            _p = os.path.join(_sec_dir, _sec_pick)
+            _sec_df = (pd.read_csv(_p) if _p.lower().endswith(".csv")
+                       else pd.read_excel(_p))
+
+        if _sec_df is None:
+            st.info("⬆️ Upload a district-level context file to run the analysis.")
+            return
+
+        # ---- build the district-level outcome ---------------------------
+        _outcome = "Below grade level (%)"
+        _grp = AGG.groupby("district")
+        _prim = (_grp.apply(lambda g: (g["below_pct"] * g["n"]).sum() / g["n"].sum(),
+                            include_groups=False)
+                 .rename(_outcome).reset_index()
+                 .rename(columns={"district": "District"}))
+
+        _key = next((c for c in _sec_df.columns
+                     if str(c).strip().lower() in
+                     ("district", "district name", "dist", "districts")), None)
+        if _key is None:
+            st.error(f"No District column in the context file. Columns found: "
+                     f"{list(_sec_df.columns)[:8]}")
+            return
+        _sec_df = _sec_df.rename(columns={_key: "District"})
+
+        _map, _rep = L_secondary.align_districts(
+            _prim["District"].tolist(),
+            _sec_df["District"].astype(str).tolist())
+        _prim["District"] = _prim["District"].map(_map).fillna(_prim["District"])
+
+        merged, _jr = L_secondary.join(_prim, _sec_df)
+        if merged is None or merged.empty:
+            st.error("Nothing joined — the two files name their districts "
+                     "differently in a way the resolver could not bridge.")
+            return
+
+        res = L_secondary.analyse(merged, _outcome)
+        tab, v, fit = res["table"], res["variance"], res["fit"]
+        tested = tab[~tab["derived"]]
+        rd = res.get("redundancy")
+        _crit = tab.attrs.get("min_detectable_r", float("nan"))
+        _nsig = int((tested["verdict"] ==
+                     "significant after FDR correction").sum())
+        _nred = int(rd["redundant"].sum()) if rd is not None and not rd.empty else 0
+
+        st.markdown("### What we found")
+
+        _lines = []
+        if not v["ok"]:
+            _lines.append(
+                f"**Nothing to explain.** Every district scored almost the "
+                f"same, so there is no difference for anything to cause.")
+        elif _nsig:
+            for r in tested[tested["verdict"] ==
+                            "significant after FDR correction"].head(4).itertuples():
+                _lines.append(
+                    f"**{r.variable} matters.** Districts with more of it have "
+                    f"{'fewer' if r.r < 0 else 'more'} children falling behind, "
+                    f"and this is strong enough that we can rule out "
+                    f"coincidence.")
+        else:
+            _t = tested.iloc[0] if len(tested) else None
+            _good = tested[tested["r"] < 0].head(4)
+            _lines.append(
+                "**Nothing about a district reliably explains how its children "
+                "do.** Not money, not libraries, not teacher numbers, not adult "
+                "literacy. So you cannot tell which districts are struggling by "
+                "looking at their circumstances — you have to look at the "
+                "schools.")
+            if len(_good):
+                _names = ", ".join(_good["variable"].head(3))
+                _lines.append(
+                    f"**But a few point the right way.** {_names} all lean "
+                    f"towards *more of it, fewer children behind* — around "
+                    f"{_good['r'].abs().mean():.2f} on a scale where 1 would be "
+                    f"a perfect match and 0 is nothing at all. That is too weak "
+                    f"to prove with only {int(tested['n'].max())} districts, but "
+                    f"it is not nothing either.")
+            _lines.append(
+                f"**Why we cannot prove it:** with {int(tested['n'].max())} "
+                f"districts, pure chance alone throws up patterns this strong "
+                f"about one time in twenty. Our strongest result is inside that "
+                f"range. **With 220 blocks instead of 31 districts, the same "
+                f"numbers would be strong enough to confirm.**")
+
+        if _nred:
+            _p0 = rd[rd["redundant"]].iloc[0]
+            _lines.append(
+                f"**Much of the district data repeats itself.** {_nred} pairs "
+                f"move almost identically — {_p0['a']} and {_p0['b']}, for "
+                f"instance. They are mostly measuring how *big* a district is, "
+                f"not how *good* it is.")
+
+        if int(tab["derived"].sum()):
+            _lines.append(
+                f"**{int(tab['derived'].sum())} columns were thrown out** "
+                f"because they were the test results in disguise, not facts "
+                f"about the district. Comparing the results to themselves would "
+                f"always look like a perfect match.")
+
+        for _l in _lines:
+            st.markdown("- " + _l)
+
+        # ---- the statistics, made visible ------------------------------
+        _ff = L_charts.effect_forest(tested, crit=_crit)
+        if _ff is not None:
+            st.plotly_chart(_ff, use_container_width=True)
+            st.markdown(
+                f"""**Graph 1 — every indicator, with its uncertainty.**
+
+| On the chart | Means |
+|---|---|
+| **White dot** | how strong the link looks (the correlation) |
+| **Grey bar** | the range the true value could be in |
+| **Red dashed line at 0** | no relationship at all |
+| **Grey band** | too small to detect with {int(tested['n'].max()) if len(tested) else 0} districts |
+
+**A bar touching the red line = we cannot even be sure of the direction.**
+A dot inside the grey band = invisible at this sample size, however it looks.""")
+
+        if len(tested):
+            _t0 = tested.iloc[0]
+            _sc = L_charts.relationship_scatter(
+                merged, _t0["variable"], _outcome, label_col="District",
+                r=float(_t0["r"]), p=float(_t0["p_raw"]))
+            if _sc is not None:
+                st.plotly_chart(_sc, use_container_width=True)
+                _dirw = ("fewer" if _t0["r"] < 0 else "more")
+                st.markdown(
+                    f"""**Graph 2 — what that strongest link actually looks like.**
+
+Each dot is one district: **{_t0['variable']}** across, **% of children below
+grade level** up. Green = doing well, red = struggling. The dotted line is the
+trend through them.
+
+It slopes {'**down**' if _t0['r'] < 0 else '**up**'} — districts with more
+{_t0['variable']} have {_dirw} children behind. But the dots sit a long way
+from the line, and that scatter is exactly what r = {_t0['r']:+.2f} measures.
+Graph 1 turns that scatter into the grey bar.""")
+
+        # =================================================================
+        #  the detail, folded away
+        # =================================================================
+    _tab17_fragment()
