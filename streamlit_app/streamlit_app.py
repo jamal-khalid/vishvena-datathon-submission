@@ -2238,6 +2238,96 @@ with tabs[1]:
                 "standing among units sitting the same paper. No raw "
                 "cross-year score change is reported as if it meant learning.**")
 
+        # ------------------------------------------------------------- cohorts
+        # THE headline chart: the same children, tracked as they move up a
+        # grade each year — Grade 4 in 2022-23 IS Grade 5 in 2023-24. Plotted
+        # in raw % correct so it reads as an ordinary curve, with each segment
+        # solid where anchoring confirms the move is real and dotted where too
+        # few shared skills exist to trust it.
+        st.markdown("### The same children, tracked as they move up a grade")
+        st.caption(
+            "Each line is one cohort. A point is that cohort's raw score on "
+            "its own paper — read as a curve, exactly like a normal trend "
+            "line. **Solid** segments are confirmed on shared skills between "
+            "the two papers; **dotted** segments could not be confirmed "
+            "(too few shared skills) and show the raw number only, which may "
+            "include a change in paper difficulty as well as real learning.")
+        _gridmap = {}
+        if _gk.get("grid") is not None and len(_gk["grid"]):
+            _gr = _gk["grid"]
+            # Column-wise, NOT .iterrows(): a row mixing an int Year with a
+            # float pct forces pandas to upcast the WHOLE row to float (a
+            # Series has one dtype), so str(row["Year"]) silently became
+            # "2022.0" — a key cohort_paths() never produces — and every
+            # lookup below missed, emptying the chart with no error.
+            for _y, _g_, _p in zip(_gr[year_col or "Year"],
+                                   _gr[grade_col or "Grade"], _gr["pct"]):
+                _gridmap[(str(_y), int(_g_))] = float(_p)
+
+        # Keep only the diagonals that are not already a sub-sequence of a
+        # longer one already kept — cohort_paths() also returns every
+        # sub-diagonal as its own independent path (e.g. G5'23→G6'24 on its
+        # own, as well as inside G4'22→G5'23→G6'24), which would otherwise
+        # draw the same segment twice.
+        _kept = []
+        for _c in _gk.get("cohorts", []):
+            _p = _c["path"]
+            _is_sub = any(
+                len(_p) < len(_a["path"]) and any(
+                    _a["path"][k:k + len(_p)] == _p
+                    for k in range(len(_a["path"]) - len(_p) + 1))
+                for _a in _kept)
+            if not _is_sub:
+                _kept.append(_c)
+
+        _pal = ["#0a5340", "#c0392b", "#2980b9", "#8e44ad", "#e67e22"]
+        _cfig = go.Figure()
+        for _ci, _c in enumerate(_kept):
+            _path, _steps = _c["path"], _c["steps"]
+            _xs = [pt[1] for pt in _path]
+            _ys = [_gridmap.get(pt) for pt in _path]
+            if any(_v is None for _v in _ys):
+                continue
+            _color = _pal[_ci % len(_pal)]
+            _jit = (_ci - (len(_kept) - 1) / 2) * 0.06
+            for _si, _step in enumerate(_steps):
+                _ok = bool(_step["meta"].get("ok"))
+                _sx = [_xs[_si] + _jit, _xs[_si + 1] + _jit]
+                _sy = [_ys[_si], _ys[_si + 1]]
+                _txt = [f"Grade {_path[_si][1]} ({_path[_si][0]})",
+                       f"Grade {_path[_si + 1][1]} ({_path[_si + 1][0]})"]
+                _cfig.add_trace(go.Scatter(
+                    x=_sx, y=_sy, mode="lines+markers", text=_txt,
+                    line=dict(color=_color, width=3 if _ok else 2,
+                             dash="solid" if _ok else "dot"),
+                    marker=dict(size=9, color=_color),
+                    name=_c["label"], legendgroup=_c["label"],
+                    showlegend=(_si == 0),
+                    hovertemplate="%{text}<br>%{y:.1f}% correct<extra></extra>"))
+                _n_anc = _step["meta"].get("n_anchors", 0)
+                if _ok:
+                    _d = float(_step["row"]["drift"])
+                    _ann = f"anchored {_d:+.1f} ({_n_anc} skills)"
+                else:
+                    _ann = f"not comparable ({_n_anc} skill" + \
+                          ("s)" if _n_anc != 1 else ")")
+                _cfig.add_annotation(
+                    x=(_sx[0] + _sx[1]) / 2, y=(_sy[0] + _sy[1]) / 2,
+                    text=_ann, showarrow=False, yshift=14,
+                    font=dict(size=10, color=_color))
+        if _cfig.data:
+            _cfig.update_layout(
+                height=380, xaxis_title="Grade", yaxis_title="% correct (raw)",
+                xaxis=dict(tickmode="array", tickvals=sorted(_gk["grades"])),
+                margin=dict(t=10, b=10, l=10, r=10),
+                legend=dict(orientation="h", y=-0.18))
+            st.plotly_chart(_cfig, use_container_width=True)
+        else:
+            st.info("Not enough overlapping years/grades in this selection "
+                    "to trace a cohort.")
+
+        st.divider()
+
         g1, g2 = st.columns([3, 2])
         with g1:
             _grid = _gk["grid"]
@@ -2245,13 +2335,16 @@ with tabs[1]:
                 _f = px.line(_grid, x=grade_col or "Grade", y="pct",
                              color=year_col or "Year", markers=True,
                              labels={"pct": "% correct"},
-                             title="Mean % correct on each paper")
+                             title="Why raw scores alone can't be trusted "
+                                   "across years")
                 _f.update_layout(height=330,
                                  margin=dict(t=48, b=10, l=10, r=10))
                 st.plotly_chart(_f, use_container_width=True)
-                st.caption("Each line is one year. If these were the same test "
-                           "the lines could not cross — that they do is the "
-                           "proof the papers changed.")
+                st.caption("⚠️ This is NOT the cohort chart above — this line "
+                           "is DIFFERENT children each grade, in the SAME "
+                           "year. It exists only to prove the papers changed "
+                           "difficulty: if these were the same test the "
+                           "lines could not cross, and they do.")
         with g2:
             st.markdown("**Papers and what they share**")
             _rows = []
