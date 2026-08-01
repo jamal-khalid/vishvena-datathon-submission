@@ -314,8 +314,25 @@ def _finalize(g, df, div_c, dist_c, blk_c, notes, stu=None):
         g["students"] = g.get("students", pd.Series(index=g.index, dtype=float)).fillna(g["n"])
 
     g = g.sort_values(["district", "block", "grade", "competency", "year"])
-    g["prev_pct"] = (g.groupby(["district", "block", "grade", "competency"])
-                       ["below_pct"].shift(1))
+    _grp = g.groupby(["district", "block", "grade", "competency"])
+    g["prev_pct"] = _grp["below_pct"].shift(1)
+
+    # `shift(1)` steps back one ROW, not one year, and the paper changes every
+    # year — a competency can be dropped and later reinstated. When that
+    # happens the previous row is two years old and the shift silently
+    # compares across the gap, so "deteriorated 30 points since last year"
+    # would actually span two years and an untested one in between.
+    #
+    # A previous row only counts as "last year" if its year is the one
+    # immediately before this row's year IN THIS DATASET. Using the dataset's
+    # own year sequence rather than year-1 keeps a biennial file (2022, 2024)
+    # working, while still rejecting a competency that skipped a year the
+    # dataset does have.
+    _years = sorted(pd.to_numeric(g["year"], errors="coerce").dropna().unique())
+    _predecessor = {y: p for p, y in zip(_years, _years[1:])}
+    _want = pd.to_numeric(g["year"], errors="coerce").map(_predecessor)
+    _got = _grp["year"].shift(1)
+    g.loc[_got.isna() | (_got != _want), "prev_pct"] = np.nan
 
     agg = g[REQUIRED].reset_index(drop=True)
     for c in ("n", "students", "f_n", "m_n"):
