@@ -203,16 +203,35 @@ def _expand(name, src):
     inside it; anything else yields itself.
     """
     if not name.lower().endswith(".zip"):
+        if hasattr(src, "seek"):
+            src.seek(0)
         yield name, src
         return
+    # An uploaded file is a ONE-SHOT stream. This function is called more than
+    # once on the same handle — load_sources() reads the data, then
+    # extract_embedded_qmaps() comes back for the Competency Mapping sheets —
+    # and without rewinding, the second pass reads b"" and zipfile reports
+    # "File is not a zip file" for a perfectly good archive.
+    if hasattr(src, "seek"):
+        src.seek(0)
     raw = open(src, "rb").read() if isinstance(src, str) else src.read()
+    if not raw:
+        raise ValueError(
+            f"'{name}' read back empty. The upload buffer was already "
+            f"consumed and could not be rewound.")
     with zipfile.ZipFile(io.BytesIO(raw)) as z:
         for info in sorted(z.infolist(), key=lambda i: i.filename):
             member = info.filename
             base = os.path.basename(member)
-            # skip directories, macOS resource forks and Excel lock files
+            # skip directories, macOS resource forks and Excel lock files —
+            # and the app's OWN combined-parquet cache, which it writes next to
+            # the source data. _scan_local already excludes those; without the
+            # same rule here, zipping a folder the app has previously read
+            # bundles the cache alongside the parts it was built from and the
+            # whole dataset is silently loaded twice.
             if (info.is_dir() or not base or base.startswith((".", "~$"))
                     or "__MACOSX" in member
+                    or base.lower().endswith(".cache.parquet")
                     or not base.lower().endswith(DATA_EXT)):
                 continue
             yield f"{os.path.basename(name)}:{member}", io.BytesIO(z.read(info))
