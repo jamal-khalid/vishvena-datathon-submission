@@ -371,10 +371,15 @@ def _suggest(comp):
 
 
 @st.cache_data(show_spinner=False)
-def secondary_context(_df, sig):
-    """District performance vs district context; Pearson r. Association only."""
+def _load_secondary():
+    """Load + canonicalize secondary_dataset.xlsx, indexed by District.
+    Cached in session_state \u2014 the workbook is static within a run, and
+    both NIPUN and PARAKH share this same district-context table."""
+    if "_mx_sec_df" in st.session_state:
+        return st.session_state["_mx_sec_df"]
     p = os.path.join(_HERE, "secondary_dataset.xlsx")
     if not os.path.exists(p):
+        st.session_state["_mx_sec_df"] = None
         return None
     sec = pd.read_excel(p)
     sec.columns = [str(c).strip() for c in sec.columns]
@@ -406,9 +411,32 @@ def secondary_context(_df, sig):
     sec["District"] = _dl.map(_KC).fillna(
         sec["District"].astype(str).str.strip().str.title())
     sec = sec.groupby("District").mean(numeric_only=True)
+    st.session_state["_mx_sec_df"] = sec
+    return sec
+
+
+def secondary_context(_df, sig):
+    """Overall district performance vs district context; Pearson r.
+    Association only \u2014 used on the NIPUN page."""
+    sec = _load_secondary()
+    if sec is None:
+        return None
     full, _ = district_year_standing(_df, sig)
     perf = full.mean(axis=1).rename("Assessment accuracy (%)")
     m = sec.join(perf, how="inner").dropna(subset=["Assessment accuracy (%)"])
+    return m if len(m) >= 8 else None
+
+
+def competency_secondary_context(cd):
+    """One competency's district accuracy (`cd`: District, Accuracy %)
+    vs district context; Pearson r. Association only \u2014 used on the
+    PARAKH page so the resource-context panel follows whichever
+    competency is selected."""
+    sec = _load_secondary()
+    if sec is None:
+        return None
+    perf = cd.set_index("District")["Accuracy %"]
+    m = sec.join(perf, how="inner").dropna(subset=["Accuracy %"])
     return m if len(m) >= 8 else None
 
 
@@ -531,6 +559,74 @@ def _choropleth(frame, value_col, color_args, hover_extra=None):
 # ==========================================================================
 #  NIPUN BHARAT PAGE
 # ==========================================================================
+def _secondary_columns():
+    """Column names in secondary_dataset.xlsx (cached), for the data note
+    below \u2014 read once per session so the explainer stays accurate even
+    if the workbook changes."""
+    if "_mx_sec_cols" in st.session_state:
+        return st.session_state["_mx_sec_cols"]
+    p = os.path.join(_HERE, "secondary_dataset.xlsx")
+    cols = []
+    if os.path.exists(p):
+        try:
+            cols = [str(c).strip() for c in pd.read_excel(p, nrows=0).columns
+                   if str(c).strip() != "District"]
+        except Exception:
+            cols = []
+    st.session_state["_mx_sec_cols"] = cols
+    return cols
+
+
+def _data_note(df, page):
+    """Small expander explaining exactly which primary/secondary columns
+    feed this page \u2014 written for anyone new to the workbook."""
+    id_cols = [c for c in ["District", "Block", "Cluster", "GP Name",
+                           "GP ID", "Year", "Grade", "Gender"]
+              if c in df.columns]
+    qcols = sorted([c for c in df.columns if re.fullmatch(r"Q\d+", str(c))],
+                   key=lambda c: int(c[1:]))
+    with st.expander("\U0001F4CE Data columns used on this page",
+                     expanded=False):
+        id_txt = ", ".join(f"`{c}`" for c in id_cols) if id_cols else "\u2014"
+        st.markdown(
+            f"**Primary data** (GP-contest assessment responses) \u2014 "
+            f"{id_txt} identify *who / where / when* each response is "
+            "from.")
+        if qcols:
+            st.markdown(
+                f"`{qcols[0]}`\u2013`{qcols[-1]}` ({len(qcols)} question "
+                "columns) hold each child's mark on that question. The "
+                "same column means a different question every year \u2014 "
+                "each is remapped every cycle to a competency (place "
+                "value, addition, subtraction, multiplication, division, "
+                "fraction, number sense, measurement, shapes, data "
+                "handling) via that year's own paper key, since the "
+                "question paper itself changes each year. `Score` is the "
+                "total mark on the paper.")
+        if "Division" in df.columns:
+            st.caption(
+                "Note: the `Division` column is the administrative "
+                "revenue division (Belagavi / Kalaburagi / Bengaluru / "
+                "Mysuru) \u2014 not the *division* arithmetic competency, "
+                "which comes from the Q-column mapping above.")
+        sc = _secondary_columns()
+        if sc:
+            where = ("used only in the *secondary context* section "
+                     "further down this page" if page == "nipun" else
+                     "used in the *resource context* panel under the "
+                     "competency map further down this page, matched "
+                     "to whichever competency is selected")
+            st.markdown(
+                f"**Secondary data** (`secondary_dataset.xlsx`, "
+                f"district-level context, {where}) \u2014 "
+                + ", ".join(f"`{c}`" for c in sc) + ". Joined to the "
+                "primary data by `District` only \u2014 it is context, "
+                "never used to explain a Block or GP.")
+        else:
+            st.markdown("**Secondary data** \u2014 `secondary_dataset.xlsx` "
+                        "was not found next to the app.")
+
+
 def render_nipun():
     _css()
     df, rq, err = load_context()
@@ -548,6 +644,8 @@ def render_nipun():
             "learning gaps that survive past the foundational stage and help "
             "prioritize remediation — this is retention monitoring, not an "
             "official measurement of NIPUN's Grade-3 targets.")
+
+    _data_note(df, "nipun")
 
     _impact_banner(df, sig, "NIPUN Bharat")
 
@@ -884,6 +982,8 @@ def render_parakh():
             "which skills a child can demonstrate. This page turns that "
             "evidence into instructional decisions.")
 
+    _data_note(df, "parakh")
+
     _impact_banner(df, sig, "PARAKH")
 
     _kpi_strip(df)
@@ -918,6 +1018,40 @@ def render_parakh():
                f"{_w.iloc[-1]['Accuracy %'] - _w.iloc[0]['Accuracy %']:.0f}-"
                f"point spread on one skill. This is where instructional "
                f"support for {comp_pick} belongs first.")
+
+    # ---- secondary (district-context) link for this competency -----------
+    st.markdown(f"#### 🔗 Resource context for {comp_pick}")
+    sm = competency_secondary_context(cd)
+    if sm is None:
+        st.caption("Secondary (district-context) data not available for "
+                   "this join.")
+    else:
+        cors = []
+        for col in sm.columns:
+            if col == "Accuracy %":
+                continue
+            r, n = pearson(sm[col], sm["Accuracy %"])
+            if r is not None:
+                cors.append((col, r))
+        cors.sort(key=lambda t: abs(t[1]), reverse=True)
+        if not cors:
+            st.caption("Not enough matched districts to compute an "
+                       "association for this competency.")
+        else:
+            with st.container(border=True):
+                for col, r in cors[:3]:
+                    tag_col = "#0F6E56" if r > 0 else "#C0392B"
+                    st.markdown(
+                        f"<span class='mi-tag' style='background:"
+                        f"{tag_col}22;color:{tag_col};'>r = {r:+.2f}</span>"
+                        f"&nbsp;&nbsp;**{col}** {'rises' if r > 0 else 'falls'}"
+                        f" with {comp_pick} accuracy across districts",
+                        unsafe_allow_html=True)
+            st.caption(
+                f"District-level association only, {len(sm)} districts "
+                "matched from `secondary_dataset.xlsx` — not causation, "
+                "and (like all secondary data on this app) never used to "
+                "explain a Block or GP.")
 
     st.divider()
 
