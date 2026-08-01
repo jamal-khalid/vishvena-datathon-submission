@@ -199,7 +199,21 @@ DISTRICT_ALIASES = {
     "shimoga": "Shivamogga", "tumkur": "Tumakuru", "chikmagalur": "Chikkamagaluru",
     "hospet": "Vijayanagara", "north kanara": "Uttara Kannada",
     "south kanara": "Dakshina Kannada",
+    # spellings seen in the district-context workbook. Without these the
+    # assessment file's canonical "Kalaburagi"/"Yadgir" fail to reach the
+    # context file's "kalaburgi"/"yadagiri" — the vowels differ in the middle
+    # of the word, so neither the loose key nor difflib bridges them.
+    "kalaburgi": "Kalaburagi", "kalburgi": "Kalaburagi",
+    "yadagiri": "Yadgir", "yadgiri": "Yadgir", "yadagir": "Yadgir",
+    "bagalkot": "Bagalkote", "vijayanagar": "Vijayanagara",
+    "chikkamagalur": "Chikkamagaluru", "chamarajanagar": "Chamarajanagara",
 }
+
+
+def _canon(name):
+    """The official spelling this name refers to, if the table knows it."""
+    n = str(name).strip()
+    return DISTRICT_ALIASES.get(n.lower(), n)
 
 
 def _dkey(name):
@@ -224,6 +238,12 @@ def align_districts(names, targets, cutoff=0.88):
     keyed = {}
     for t in tgt:
         keyed.setdefault(_dkey(t), t)
+    # The alias table is one-way (variant -> official), but EITHER side can be
+    # the variant: the assessment file may be canonical while the context file
+    # is not. Canonicalising both sides makes the match direction-independent.
+    canon = {}
+    for t in tgt:
+        canon.setdefault(_dkey(_canon(t)), t)
 
     mapping, changed, unmatched = {}, [], []
     for raw in names:
@@ -244,6 +264,11 @@ def align_districts(names, targets, cutoff=0.88):
         if k in keyed:
             mapping[raw] = keyed[k]
             changed.append((raw, keyed[k], "spelling variant"))
+            continue
+        ck = _dkey(_canon(n))
+        if ck in canon:
+            mapping[raw] = canon[ck]
+            changed.append((raw, canon[ck], "known rename"))
             continue
         close = difflib.get_close_matches(n, tgt, n=1, cutoff=cutoff)
         if close:

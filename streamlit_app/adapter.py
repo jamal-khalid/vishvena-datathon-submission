@@ -117,11 +117,51 @@ def build_agg(df, *, hierarchy, score_col=None, year_col=None, gender_col=None,
     else:
         div_c = dist_c = blk_c = h[0]
 
+    # Positional mapping alone is wrong the moment the file carries MORE than
+    # three levels. The real GP-contest data has State/Division/District/Block/
+    # Cluster, so h[1] is Division and the aggregate's "district" column ends
+    # up holding division names — which silently kills every district-keyed
+    # feature: the cross-dataset join matches 0 of 31 rows and degrades to
+    # "no context", district briefs describe divisions, and the district picker
+    # lists four items. Bind by NAME whenever the name exists, and fall back to
+    # position only for files that don't label their levels.
+    _by_name = {}
+    for c in h:
+        k = str(c).strip().lower()
+        if k in ("division", "divisions"):
+            _by_name.setdefault("division", c)
+        elif k in ("district", "district name", "districts"):
+            _by_name.setdefault("district", c)
+        elif k in ("block", "blocks", "taluk", "taluka"):
+            _by_name.setdefault("block", c)
+    if "district" in _by_name:
+        dist_c = _by_name["district"]
+        div_c = _by_name.get("division", div_c)
+        if _by_name.get("block"):
+            blk_c = _by_name["block"]
+        elif blk_c == dist_c or h.index(blk_c) <= h.index(dist_c):
+            # keep the reporting unit strictly finer than the district
+            _finer = [c for c in h if h.index(c) > h.index(dist_c)]
+            blk_c = _finer[0] if _finer else dist_c
+        if div_c == dist_c or h.index(div_c) >= h.index(dist_c):
+            _coarser = [c for c in h if h.index(c) < h.index(dist_c)]
+            div_c = _coarser[-1] if _coarser else dist_c
+        notes.append(f"levels bound by name: division={div_c}, "
+                     f"district={dist_c}, block={blk_c}")
+
     if finest and finest in h:                  # override the reporting unit
         i = h.index(finest)
         blk_c = finest
-        dist_c = h[max(i - 1, 0)] if i > 0 else finest
-        div_c = h[0]
+        # `finest` chooses HOW FINE the reporting unit is. It must not re-label
+        # what a district is: deriving dist_c positionally from it is what put
+        # division names in the "district" column when the reporting unit was
+        # set to District on a State/Division/District/... file.
+        if "district" in _by_name and h.index(_by_name["district"]) <= i:
+            dist_c = _by_name["district"]
+            div_c = _by_name.get("division", div_c)
+        else:
+            dist_c = h[max(i - 1, 0)] if i > 0 else finest
+            div_c = h[0]
 
     base = pd.DataFrame({
         "division": d[div_c].astype(str),

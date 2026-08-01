@@ -81,3 +81,13 @@ htmlcov/
 *.tmp
 *.bak
 *.sqlite3
+
+# ==========================
+# Datathon data — NEVER commit
+# ==========================
+# The assessment file is the competition's primary dataset and the repo is
+# public during judging. _upload_cache holds the last browser upload verbatim;
+# _fixture holds a sampled copy used only for local testing.
+streamlit_app/_upload_cache/
+_fixture/
+*.cache.parquet
