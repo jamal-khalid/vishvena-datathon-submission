@@ -77,6 +77,134 @@ def load_context():
     return df, {(str(y), int(g)): m for (y, g), m in rq.items()}, None
 
 
+def scale_kpis(df):
+    """Dataset-scale KPIs for the mission pages (boss-requested strip)."""
+    c = {s.lower(): s for s in df.columns.astype(str)}
+    blocks = (df.groupby([c["district"], c["block"]]).ngroups
+              if "block" in c else None)
+    clusters = (df.groupby([c["district"], c["block"], c["cluster"]]).ngroups
+                if "cluster" in c else None)
+    gp = c.get("gp id") or c.get("gp name") or c.get("gp")
+    return {"records": len(df),
+            "districts": df[c["district"]].nunique(),
+            "blocks": blocks,
+            "clusters": clusters,
+            "gps": df[gp].nunique() if gp else None}
+
+
+def _kpi_strip(df):
+    s = scale_kpis(df)
+    k = st.columns(5)
+    k[0].metric("Records", f"{s['records']:,}")
+    k[1].metric("Districts", s["districts"],
+                help="Administrative districts. The workbooks name 31 — "
+                     "3 educational districts (Chikkodi, Madhugiri, Sirsi) "
+                     "are counted inside their parents (Belagavi, Tumakuru, "
+                     "Uttara Kannada).")
+    k[2].metric("Blocks", s["blocks"] or "—",
+                help="Distinct district + block combinations.")
+    k[3].metric("Clusters", f"{s['clusters']:,}" if s["clusters"] else "—",
+                help="Distinct district + block + cluster combinations.")
+    k[4].metric("Gram Panchayats", f"{s['gps']:,}" if s["gps"] else "—",
+                help="Distinct GP IDs (GP names repeat across clusters).")
+
+
+@st.cache_data(show_spinner=False)
+def impact_stats(_df, sig):
+    """Akshara-impact numbers, each computable and defensible:
+    anchored cohort improvement = same children a year older, measured only
+    on the competencies both consecutive papers share."""
+    df, rq, _ = load_context()
+    qs = _qcols(df)
+    ycol = next(c for c in df.columns if str(c).lower() == "year")
+    gcol = next(c for c in df.columns if str(c).lower() == "grade")
+    rqn = {(_year_key(y), int(g)): m for (y, g), m in rq.items()}
+    ys = sorted({k[0] for k in rqn})
+    gs = sorted({k[1] for k in rqn})
+    steps = []
+    for i in range(len(ys) - 1):
+        for g in gs[:-1]:
+            a, b = (ys[i], g), (ys[i + 1], g + 1)
+            if a in rqn and b in rqn:
+                shared = set(rqn[a].values()) & set(rqn[b].values())
+                if len(shared) < 4:
+                    continue
+
+                def _acc(k):
+                    m = rqn[k]
+                    items = [q for q, c in m.items()
+                             if c in shared and q in qs]
+                    sub = df[(df[ycol].map(_year_key) == k[0])
+                             & (pd.to_numeric(df[gcol],
+                                              errors="coerce") == k[1])]
+                    return float(sub[items].mean(axis=1).mean() * 100)
+                va, vb = _acc(a), _acc(b)
+                steps.append({"label": f"G{g} {a[0]}→G{g+1} {b[0]}",
+                              "a": va, "b": vb, "d": vb - va,
+                              "rel": (vb - va) / va * 100,
+                              "n_shared": len(shared)})
+    best = max(steps, key=lambda s: s["rel"]) if steps else None
+    full, pct = district_year_standing(_df, sig)
+    dmove, _ = movement_classes(pct)
+    return {"steps": steps, "best": best,
+            "avg_rel": float(np.mean([s["rel"] for s in steps]))
+            if steps else 0.0,
+            "climbers": int((dmove >= 5).sum()), "panel": len(dmove),
+            "signals": len(intervention_signals(_df, sig, 50.0))}
+
+
+def _impact_banner(df, sig, mission):
+    s = impact_stats(df, sig)
+    sc = scale_kpis(df)
+    best = s["best"] or {"rel": 0, "label": "—", "a": 0, "b": 0,
+                         "n_shared": 0}
+    _pctshare = (s["climbers"] / s["panel"] * 100) if s["panel"] else 0
+    stats = [
+        (f"+{best['rel']:.1f}%",
+         "relative skill gain, latest cohort",
+         f"{best['label']}: {best['a']:.1f}% → {best['b']:.1f}% on the "
+         f"{best['n_shared']} skills both papers share"),
+        (f"{s['climbers']} of {s['panel']}",
+         "districts climbing vs peers",
+         f"{_pctshare:.0f}% gained ≥5 percentile places over 3 years "
+         "(paper-proof standing)"),
+        (f"{sc['records'] / 1e5:.1f} L",
+         "children's skills evidenced",
+         f"across {sc['gps']:,} Gram Panchayats — evidence at a scale no "
+         "survey reaches"),
+        (f"{s['signals']}",
+         "targeted intervention signals",
+         "district × skill gaps detected, prioritized and monitorable"),
+    ]
+    cells = "".join(
+        f"<div style='flex:1;min-width:170px;background:rgba(255,255,255,.10);"
+        f"border:1px solid rgba(255,255,255,.25);border-radius:12px;"
+        f"padding:12px 14px;'>"
+        f"<div style='font-size:30px;font-weight:800;color:#ffffff;"
+        f"line-height:1.05;'>{v}</div>"
+        f"<div style='font-size:12px;font-weight:700;color:#c9f2e4;"
+        f"text-transform:uppercase;letter-spacing:.5px;'>{t}</div>"
+        f"<div style='font-size:11.5px;color:#e6fff6;opacity:.9;"
+        f"margin-top:3px;'>{d}</div></div>"
+        for v, t, d in stats)
+    st.markdown(
+        "<div style='background:linear-gradient(120deg,#0a5340,#0F6E56 55%,"
+        "#10B981);border-radius:16px;padding:18px 20px;margin:10px 0 4px;'>"
+        "<div style='color:#c9f2e4;font-size:12px;font-weight:800;"
+        "letter-spacing:1px;'>AKSHARA FOUNDATION · GANITHA KALIKA ANDOLANA"
+        "</div>"
+        f"<div style='color:#ffffff;font-size:22px;font-weight:800;"
+        f"margin:2px 0 10px;'>Measured contribution to {mission}</div>"
+        f"<div style='display:flex;gap:10px;flex-wrap:wrap;'>{cells}</div>"
+        "</div>", unsafe_allow_html=True)
+    st.caption("How these are measured: cohort gain follows the *same "
+               "children a year older*, scored only on the competencies "
+               "both consecutive papers share (papers change yearly); "
+               "district movement is percentile standing among districts "
+               "covered every year. Observational programme evidence — "
+               "measured, not modeled.")
+
+
 def _sig(df):
     return f"{len(df)}:{df.columns.size}:{float(pd.to_numeric(df.iloc[:200].select_dtypes('number').sum().sum(), errors='coerce') or 0):.0f}"
 
@@ -245,16 +373,39 @@ def _suggest(comp):
 @st.cache_data(show_spinner=False)
 def secondary_context(_df, sig):
     """District performance vs district context; Pearson r. Association only."""
-    try:
-        import missions_page as _mp
-        sec = _mp._load_secondary()
-    except Exception:
-        p = os.path.join(_HERE, "secondary_dataset.xlsx")
-        if not os.path.exists(p):
-            return None
-        sec = pd.read_excel(p)
-        sec.columns = [str(c).strip() for c in sec.columns]
-        sec = sec.set_index("District")
+    p = os.path.join(_HERE, "secondary_dataset.xlsx")
+    if not os.path.exists(p):
+        return None
+    sec = pd.read_excel(p)
+    sec.columns = [str(c).strip() for c in sec.columns]
+    # normalize district names with the app's own canon (handles both the
+    # lowercase GP-contest spellings and Title-case variants)
+    _KC = {"bagalkot": "Bagalkote", "ballari": "Ballari",
+           "belagavi": "Belagavi", "belagavi chikkodi": "Belagavi",
+           "bengaluru rural": "Bengaluru Rural",
+           "bengaluru urban": "Bengaluru Urban", "bidar": "Bidar",
+           "chamarajanagara": "Chamarajanagara",
+           "chamarajanagar": "Chamarajanagara",
+           "chikkaballapura": "Chikkaballapura",
+           "chikkamagaluru": "Chikkamagaluru",
+           "chitradurga": "Chitradurga",
+           "dakshina kannada": "Dakshina Kannada",
+           "davanagere": "Davanagere", "dharwad": "Dharwad",
+           "gadag": "Gadag", "hassan": "Hassan", "haveri": "Haveri",
+           "kalaburgi": "Kalaburagi", "kalaburagi": "Kalaburagi",
+           "kodagu": "Kodagu", "kolar": "Kolar", "koppal": "Koppal",
+           "mandya": "Mandya", "mysuru": "Mysuru", "raichur": "Raichur",
+           "ramanagara": "Ramanagara", "shivamogga": "Shivamogga",
+           "tumakuru": "Tumakuru", "tumakuru madhugiri": "Tumakuru",
+           "udupi": "Udupi", "uttara kannada": "Uttara Kannada",
+           "uttara kannada sirsi": "Uttara Kannada",
+           "vijayanagar": "Vijayanagara", "vijayanagara": "Vijayanagara",
+           "vijayapura": "Vijayapura", "yadagiri": "Yadgir",
+           "yadgir": "Yadgir"}
+    _dl = sec["District"].astype(str).str.strip().str.lower()
+    sec["District"] = _dl.map(_KC).fillna(
+        sec["District"].astype(str).str.strip().str.title())
+    sec = sec.groupby("District").mean(numeric_only=True)
     full, _ = district_year_standing(_df, sig)
     perf = full.mean(axis=1).rename("Assessment accuracy (%)")
     m = sec.join(perf, how="inner").dropna(subset=["Assessment accuracy (%)"])
@@ -362,6 +513,8 @@ def render_nipun():
             "prioritize remediation — this is retention monitoring, not an "
             "official measurement of NIPUN's Grade-3 targets.")
 
+    _impact_banner(df, sig, "NIPUN Bharat")
+
     ca = competency_accuracy(df, sig)
     fnd = ca[ca["competency"].isin(FOUNDATIONAL)]
     fnd_by_year = (fnd.groupby("Year")
@@ -374,85 +527,11 @@ def render_nipun():
     _fnd_now = float(fnd_by_year.iloc[-1])
     _gapw = float(gg["Gap (G−B)"].abs().max()) if len(gg) else 0
 
-    k = st.columns(5)
-    k[0].metric("Foundational competency health",
-                f"{_fnd_now:.0f}%",
-                help="Latest-year accuracy on number sense, place value, "
-                     "addition, subtraction — each child scored on their own "
-                     "paper.")
-    k[1].metric("Districts requiring attention",
-                int((dcls == "Declining ↓").sum()
-                    + pgaps["District"].nunique() if len(pgaps) else 0),
-                help="Declining standing or a persistent competency gap.")
-    k[2].metric("Persistent competency gaps",
-                len(pgaps),
-                help="District × competency below 50% in every tested year.")
-    k[3].metric("3-year foundational trend",
-                f"{float(fnd_by_year.iloc[-1] - fnd_by_year.iloc[0]):+.1f} pts",
-                help="⚠️ Papers change yearly — read as indicative, with the "
-                     "percentile view for movement.")
-    k[4].metric("Widest gender gap (any skill)", f"{_gapw:.1f} pts")
-
-    st.divider()
-
-    # ---- 2 · 3-year trajectory ------------------------------------------
-    st.markdown("### 📈 3-year learning trajectory")
-    c1, c2 = st.columns([1.5, 1])
-    with c1:
-        tr = (fnd.groupby(["Year", "Grade"])
-              .apply(lambda x: np.average(x["acc"], weights=x["n"]),
-                     include_groups=False).rename("acc").reset_index())
-        tr["Grade"] = "Grade " + tr["Grade"].astype(str)
-        fig = px.line(tr, x="Year", y="acc", color="Grade", markers=True,
-                      labels={"acc": "Foundational accuracy %"},
-                      color_discrete_sequence=[ACCENT, "#10B981", "#67a99a"])
-        ov = fnd_by_year.reset_index()
-        ov.columns = ["Year", "acc"]
-        fig.add_scatter(x=ov["Year"], y=ov["acc"], name="All grades",
-                        mode="lines+markers",
-                        line=dict(color="#101828", width=3, dash="dot"))
-        fig.update_layout(height=340, margin=dict(t=10, b=10),
-                          legend=dict(orientation="h", y=-0.25))
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("⚠️ A different paper is set every year, so these lines "
-                   "mix learning with paper difficulty. They answer "
-                   "*'roughly where is foundational learning'*; for who is "
-                   "genuinely moving, use District movement below (percentile "
-                   "standing, paper-proof).")
-    with c2:
-        st.markdown("**Foundational skills = the NIPUN core**")
-        st.markdown("- number sense\n- place value\n- addition\n- subtraction")
-        st.caption("Tracked separately from operations "
-                   "(×, ÷, fractions) and applied skills (measurement, "
-                   "shapes, data). Foundational weakness that persists into "
-                   "Grades 4–6 is exactly what NIPUN aims to prevent.")
-        _worst_f = (fnd.groupby("competency")
-                    .apply(lambda x: np.average(x["acc"], weights=x["n"]),
-                           include_groups=False).sort_values())
-        st.metric("Weakest foundational skill",
-                  _worst_f.index[0], f"{_worst_f.iloc[0]:.0f}% accuracy")
-
-    st.divider()
-
-    # ---- 3 · competency health heatmap ----------------------------------
-    st.markdown("### 🔥 Competency health — persistence at a glance")
-    hm = (ca.groupby(["competency", "Year"])
-          .apply(lambda x: np.average(x["acc"], weights=x["n"]),
-                 include_groups=False).rename("acc").reset_index()
-          .pivot(index="competency", columns="Year", values="acc"))
-    order = [c for c in FOUNDATIONAL + OPERATIONS + APPLIED if c in hm.index]
-    hm = hm.reindex(order).round(0)
-    fig = px.imshow(hm, color_continuous_scale="RdYlGn", range_color=[30, 80],
-                    aspect="auto", text_auto=True, height=420,
-                    labels={"color": "% correct"})
-    fig.update_layout(margin=dict(t=6, b=6), coloraxis_showscale=False,
-                      paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#26303e"))
-    st.plotly_chart(fig, use_container_width=True)
-    _low = hm.min(axis=1).sort_values()
-    st.caption(f"Blank = not tested that year (the paper changes yearly). A "
-               f"row that stays red is a persistent weakness — worst here: "
-               f"**{_low.index[0]}**, never above "
-               f"{hm.loc[_low.index[0]].max():.0f}%.")
+    _kpi_strip(df)
+    st.caption(f"Foundational competency health (latest year): "
+               f"**{_fnd_now:.0f}%** · persistent competency gaps: "
+               f"**{len(pgaps)}** · widest gender gap on any skill: "
+               f"**{_gapw:.1f} pts**")
 
     st.divider()
 
@@ -530,6 +609,86 @@ def render_nipun():
 
     st.divider()
 
+    # ---- 10 · policy recommendation -------------------------------------
+    st.markdown("### 📋 Policy recommendation — evidence to monitoring")
+    _sigs0 = intervention_signals(df, sig, 50.0)   # default threshold; the
+    thr0 = 50                                      # engine below re-computes
+    for s in _sigs0[:3]:
+        with st.container(border=True):
+            _flow([f"DATA: {s['competency']} at {s['latest']:.0f}% in "
+                   f"{s['district']}",
+                   f"INSIGHT: below {thr0}% in every tested year",
+                   "RISK: children enter higher grades with the gap "
+                   "unresolved",
+                   f"RECOMMEND: {s['suggestion'].split(' — ')[0]}",
+                   f"MONITOR: {s['competency']} accuracy next cycle"])
+
+    # ---- 11 + 12 · alignment + next steps --------------------------------
+    st.divider()
+    st.markdown("### 🎯 How Learning Insights supports NIPUN")
+    _flow(["NIPUN objective", "Foundational numeracy",
+           "Assessment evidence (1.38M responses)", "Competency gap detection",
+           "Geographic prioritization", "Targeted intervention",
+           "Repeat assessment", "Monitor improvement"])
+    st.markdown("### ⏭️ Recommended next steps")
+    st.markdown(
+        "1. Confirm the priority regions above with district officers\n"
+        "2. Target the weakest foundational competencies first\n"
+        "3. Verify persistence at Block/GP level in the main dashboard\n"
+        "4. Deploy targeted remediation in Critical districts\n"
+        "5. Re-assess and recompute these signals next cycle\n"
+        "6. Re-prioritize from the new evidence")
+
+
+# ==========================================================================
+#  PARAKH PAGE
+# ==========================================================================
+    # ---- 9 · early-intervention engine -----------------------------------
+    st.markdown("### 🚨 Early-intervention engine")
+    e1, e2 = st.columns(2)
+    thr = e1.slider("Weakness threshold (accuracy below…)", 30, 65, 50, 5,
+                    key="nipun_thr")
+    st.caption("Deterministic rule: accuracy below the threshold in **every** "
+               "year the competency was tested, with minimal improvement or "
+               "falling standing → intervention signal. No model, fully "
+               "auditable.")
+    sigs = intervention_signals(df, sig, float(thr))
+    if not sigs:
+        st.success("No district × competency pair meets the persistence rule "
+                   "at this threshold.")
+    for s in sigs[:8]:
+        col = "#d73027" if s["priority"] == "HIGH" else "#fc8d59"
+        with st.container(border=True):
+            st.markdown(
+                f"<span class='mi-tag' style='background:{col}22;color:{col};"
+                f"'>{s['priority']} PRIORITY</span>  **{s['district']}** — "
+                f"{s['signal']}", unsafe_allow_html=True)
+            st.markdown(f"Evidence: {s['evidence']}  ·  Trend: {s['trend']}")
+            st.caption(f"Suggested intervention: {s['suggestion']}")
+    if len(sigs) > 8:
+        with st.expander(f"All {len(sigs)} signals"):
+            st.dataframe(pd.DataFrame(sigs), use_container_width=True,
+                         hide_index=True)
+
+    st.divider()
+
+    # ---- 8 · district movement ------------------------------------------
+    st.markdown("### 🧭 District movement — improving, stable, declining")
+    st.caption("Percentile standing among the districts covered in every "
+               "year — the paper-proof way to read cross-year movement.")
+    mv = pd.DataFrame({"Δ pctile": dmove, "Class": dcls}).sort_values(
+        "Δ pctile", ascending=False)
+    c1, c2, c3 = st.columns(3)
+    for box, label, emoji in ((c1, "Improving ↑", "🟢"),
+                              (c2, "Stable →", "🟡"),
+                              (c3, "Declining ↓", "🔴")):
+        sub = mv[mv["Class"] == label]
+        box.markdown(f"**{emoji} {label} ({len(sub)})**")
+        for d, r in sub.head(6).iterrows():
+            box.markdown(f"- {d} ({r['Δ pctile']:+.0f})")
+
+    st.divider()
+
     # ---- 6 · gender -------------------------------------------------------
     st.markdown("### ⚖️ Gender — persistent, narrowing, or widening?")
     ggy = gender_gap_by(df, sig, key="Year")
@@ -548,6 +707,45 @@ def render_nipun():
     st.caption(f"The overall gap {_dirw}: {_g0:+.1f} pts (girls − boys) in "
                f"{ggy.index[0]} → {_g1:+.1f} pts in {ggy.index[-1]}. "
                f"Per-competency gaps live on the PARAKH page.")
+
+    st.divider()
+
+    # ---- 2 · 3-year trajectory ------------------------------------------
+    st.markdown("### 📈 3-year learning trajectory")
+    c1, c2 = st.columns([1.5, 1])
+    with c1:
+        tr = (fnd.groupby(["Year", "Grade"])
+              .apply(lambda x: np.average(x["acc"], weights=x["n"]),
+                     include_groups=False).rename("acc").reset_index())
+        tr["Grade"] = "Grade " + tr["Grade"].astype(str)
+        fig = px.line(tr, x="Year", y="acc", color="Grade", markers=True,
+                      labels={"acc": "Foundational accuracy %"},
+                      color_discrete_sequence=[ACCENT, "#10B981", "#67a99a"])
+        ov = fnd_by_year.reset_index()
+        ov.columns = ["Year", "acc"]
+        fig.add_scatter(x=ov["Year"], y=ov["acc"], name="All grades",
+                        mode="lines+markers",
+                        line=dict(color="#101828", width=3, dash="dot"))
+        fig.update_layout(height=340, margin=dict(t=10, b=10),
+                          legend=dict(orientation="h", y=-0.25))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("⚠️ A different paper is set every year, so these lines "
+                   "mix learning with paper difficulty. They answer "
+                   "*'roughly where is foundational learning'*; for who is "
+                   "genuinely moving, use District movement below (percentile "
+                   "standing, paper-proof).")
+    with c2:
+        st.markdown("**Foundational skills = the NIPUN core**")
+        st.markdown("- number sense\n- place value\n- addition\n- subtraction")
+        st.caption("Tracked separately from operations "
+                   "(×, ÷, fractions) and applied skills (measurement, "
+                   "shapes, data). Foundational weakness that persists into "
+                   "Grades 4–6 is exactly what NIPUN aims to prevent.")
+        _worst_f = (fnd.groupby("competency")
+                    .apply(lambda x: np.average(x["acc"], weights=x["n"]),
+                           include_groups=False).sort_values())
+        st.metric("Weakest foundational skill",
+                  _worst_f.index[0], f"{_worst_f.iloc[0]:.0f}% accuracy")
 
     st.divider()
 
@@ -583,87 +781,56 @@ def render_nipun():
                                "**Association only** — this may warrant "
                                "further investigation, and cannot explain "
                                "any individual GP.")
+        # full association table: every numeric context indicator vs accuracy
+        _rows = []
+        for col in m.select_dtypes("number").columns:
+            if col == "Assessment accuracy (%)":
+                continue
+            r, n = pearson(m[col], m["Assessment accuracy (%)"])
+            if r is not None:
+                _rows.append({"District indicator": col,
+                              "r vs accuracy": round(r, 2),
+                              "Districts": n})
+        if _rows:
+            _at = (pd.DataFrame(_rows)
+                   .sort_values("r vs accuracy", key=lambda s: s.abs(),
+                                ascending=False))
+            with st.expander(f"All context associations "
+                             f"({len(_at)} indicators)"):
+                st.dataframe(
+                    _at, use_container_width=True, hide_index=True,
+                    column_config={"r vs accuracy":
+                                   st.column_config.NumberColumn(
+                                       format="%+.2f")})
+                st.caption("Pearson r between each district-level indicator "
+                           "and district assessment accuracy. Association, "
+                           "never causation; district level only — none of "
+                           "this explains an individual Block or GP.")
 
     st.divider()
 
-    # ---- 8 · district movement ------------------------------------------
-    st.markdown("### 🧭 District movement — improving, stable, declining")
-    st.caption("Percentile standing among the districts covered in every "
-               "year — the paper-proof way to read cross-year movement.")
-    mv = pd.DataFrame({"Δ pctile": dmove, "Class": dcls}).sort_values(
-        "Δ pctile", ascending=False)
-    c1, c2, c3 = st.columns(3)
-    for box, label, emoji in ((c1, "Improving ↑", "🟢"),
-                              (c2, "Stable →", "🟡"),
-                              (c3, "Declining ↓", "🔴")):
-        sub = mv[mv["Class"] == label]
-        box.markdown(f"**{emoji} {label} ({len(sub)})**")
-        for d, r in sub.head(6).iterrows():
-            box.markdown(f"- {d} ({r['Δ pctile']:+.0f})")
+    # ---- 3 · competency health heatmap ----------------------------------
+    st.markdown("### 🔥 Competency health — persistence at a glance")
+    hm = (ca.groupby(["competency", "Year"])
+          .apply(lambda x: np.average(x["acc"], weights=x["n"]),
+                 include_groups=False).rename("acc").reset_index()
+          .pivot(index="competency", columns="Year", values="acc"))
+    order = [c for c in FOUNDATIONAL + OPERATIONS + APPLIED if c in hm.index]
+    hm = hm.reindex(order).round(0)
+    fig = px.imshow(hm, color_continuous_scale="RdYlGn", range_color=[30, 80],
+                    aspect="auto", text_auto=True, height=420,
+                    labels={"color": "% correct"})
+    fig.update_layout(margin=dict(t=6, b=6), coloraxis_showscale=False,
+                      paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#26303e"))
+    st.plotly_chart(fig, use_container_width=True)
+    _low = hm.min(axis=1).sort_values()
+    st.caption(f"Blank = not tested that year (the paper changes yearly). A "
+               f"row that stays red is a persistent weakness — worst here: "
+               f"**{_low.index[0]}**, never above "
+               f"{hm.loc[_low.index[0]].max():.0f}%.")
 
     st.divider()
 
-    # ---- 9 · early-intervention engine -----------------------------------
-    st.markdown("### 🚨 Early-intervention engine")
-    e1, e2 = st.columns(2)
-    thr = e1.slider("Weakness threshold (accuracy below…)", 30, 65, 50, 5,
-                    key="nipun_thr")
-    st.caption("Deterministic rule: accuracy below the threshold in **every** "
-               "year the competency was tested, with minimal improvement or "
-               "falling standing → intervention signal. No model, fully "
-               "auditable.")
-    sigs = intervention_signals(df, sig, float(thr))
-    if not sigs:
-        st.success("No district × competency pair meets the persistence rule "
-                   "at this threshold.")
-    for s in sigs[:8]:
-        col = "#d73027" if s["priority"] == "HIGH" else "#fc8d59"
-        with st.container(border=True):
-            st.markdown(
-                f"<span class='mi-tag' style='background:{col}22;color:{col};"
-                f"'>{s['priority']} PRIORITY</span>  **{s['district']}** — "
-                f"{s['signal']}", unsafe_allow_html=True)
-            st.markdown(f"Evidence: {s['evidence']}  ·  Trend: {s['trend']}")
-            st.caption(f"Suggested intervention: {s['suggestion']}")
-    if len(sigs) > 8:
-        with st.expander(f"All {len(sigs)} signals"):
-            st.dataframe(pd.DataFrame(sigs), use_container_width=True,
-                         hide_index=True)
-
-    st.divider()
-
-    # ---- 10 · policy recommendation -------------------------------------
-    st.markdown("### 📋 Policy recommendation — evidence to monitoring")
-    for s in sigs[:3]:
-        with st.container(border=True):
-            _flow([f"DATA: {s['competency']} at {s['latest']:.0f}% in "
-                   f"{s['district']}",
-                   f"INSIGHT: below {thr}% in every tested year",
-                   "RISK: children enter higher grades with the gap "
-                   "unresolved",
-                   f"RECOMMEND: {s['suggestion'].split(' — ')[0]}",
-                   f"MONITOR: {s['competency']} accuracy next cycle"])
-
-    # ---- 11 + 12 · alignment + next steps --------------------------------
-    st.divider()
-    st.markdown("### 🎯 How Learning Insights supports NIPUN")
-    _flow(["NIPUN objective", "Foundational numeracy",
-           "Assessment evidence (1.38M responses)", "Competency gap detection",
-           "Geographic prioritization", "Targeted intervention",
-           "Repeat assessment", "Monitor improvement"])
-    st.markdown("### ⏭️ Recommended next steps")
-    st.markdown(
-        "1. Confirm the priority regions above with district officers\n"
-        "2. Target the weakest foundational competencies first\n"
-        "3. Verify persistence at Block/GP level in the main dashboard\n"
-        "4. Deploy targeted remediation in Critical districts\n"
-        "5. Re-assess and recompute these signals next cycle\n"
-        "6. Re-prioritize from the new evidence")
-
-
-# ==========================================================================
-#  PARAKH PAGE
-# ==========================================================================
 def render_parakh():
     _css()
     df, rq, err = load_context()
@@ -681,56 +848,14 @@ def render_parakh():
             "which skills a child can demonstrate. This page turns that "
             "evidence into instructional decisions.")
 
+    _impact_banner(df, sig, "PARAKH")
+
+    _kpi_strip(df)
+    st.divider()
+
     ca = competency_accuracy(df, sig)
     order = [c for c in FOUNDATIONAL + OPERATIONS + APPLIED
              if c in set(ca["competency"])]
-
-    # ---- core: competency × grade matrix ---------------------------------
-    st.markdown("### 🧩 Competency performance matrix")
-    hm = (ca.groupby(["competency", "Grade"])
-          .apply(lambda x: np.average(x["acc"], weights=x["n"]),
-                 include_groups=False).rename("acc").reset_index()
-          .pivot(index="competency", columns="Grade", values="acc")
-          .reindex(order).round(0))
-    hm.columns = [f"Grade {int(c)}" for c in hm.columns]
-    fig = px.imshow(hm, color_continuous_scale="RdYlGn", range_color=[30, 80],
-                    aspect="auto", text_auto=True, height=420,
-                    labels={"color": "% correct"})
-    fig.update_layout(margin=dict(t=6, b=6), coloraxis_showscale=False,
-                      paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#26303e"))
-    st.plotly_chart(fig, use_container_width=True)
-    _flat = (hm.max(axis=1) - hm.min(axis=1)).sort_values()
-    _worst = hm.min(axis=1).sort_values()
-    st.caption(f"Rows = skills, columns = grades, each cell = % of that "
-               f"grade demonstrating the skill (each child scored on their "
-               f"own year's paper). **{_worst.index[0]}** is the weakest "
-               f"skill; **{_flat.index[0]}** barely moves across grades "
-               f"({_flat.iloc[0]:.0f}-pt range) — a skill children are not "
-               f"gaining as they progress.")
-
-    st.divider()
-
-    # ---- yearly trend with selector --------------------------------------
-    st.markdown("### 📅 Competency trend over the three years")
-    picks = st.multiselect("Competencies", order,
-                           default=[c for c in ("division", "number sense",
-                                                "measurement") if c in order],
-                           key="parakh_comps")
-    if picks:
-        tr = (ca[ca["competency"].isin(picks)]
-              .groupby(["competency", "Year"])
-              .apply(lambda x: np.average(x["acc"], weights=x["n"]),
-                     include_groups=False).rename("acc").reset_index())
-        fig = px.line(tr, x="Year", y="acc", color="competency", markers=True,
-                      labels={"acc": "Accuracy %"})
-        fig.update_layout(height=330, margin=dict(t=8, b=8),
-                          legend=dict(orientation="h", y=-0.28))
-        st.plotly_chart(fig, use_container_width=True)
-        st.caption("⚠️ The paper changes yearly — trends are indicative; a "
-                   "skill low in *every* year (like division) is the robust "
-                   "finding, not small year-to-year wiggles.")
-
-    st.divider()
 
     # ---- geographic competency gap ---------------------------------------
     st.markdown("### 🗺️ Where is a specific competency weakest?")
@@ -757,6 +882,36 @@ def render_parakh():
                f"{_w.iloc[-1]['Accuracy %'] - _w.iloc[0]['Accuracy %']:.0f}-"
                f"point spread on one skill. This is where instructional "
                f"support for {comp_pick} belongs first.")
+
+    st.divider()
+
+    # ---- recommendation ---------------------------------------------------
+    st.markdown("### 📋 Assessment-driven recommendations")
+    overall = (ca.groupby("competency")
+               .apply(lambda x: np.average(x["acc"], weights=x["n"]),
+                      include_groups=False).sort_values())
+    for comp in overall.index[:3]:
+        cd2 = (cad[cad["competency"] == comp].groupby("District")
+               .apply(lambda x: np.average(x["acc"], weights=x["n"]),
+                      include_groups=False).sort_values())
+        _where = ", ".join(cd2.index[:3])
+        with st.container(border=True):
+            _flow([f"Competency: {comp}",
+                   f"Observed: {overall[comp]:.0f}% statewide",
+                   f"Concentrated: {_where}",
+                   "Persistent across years"
+                   if comp in set(persistent_gaps(df, sig)["competency"])
+                   else "Present in the latest cycle",
+                   f"Recommend: {_suggest(comp).split(' — ')[0]}",
+                   f"Monitor: {comp} accuracy next assessment"])
+    # ---- data → decision pipeline ----------------------------------------
+    st.markdown("### 🔁 Why competency-based assessment matters")
+    _flow(["Assessment question", "Competency", "Performance evidence",
+           "Gap detection", "Geographic identification",
+           "Instructional / policy intervention", "Reassessment"])
+    st.caption("The pipeline PARAKH stands for: an exam answer becomes skill "
+               "evidence, evidence becomes a located gap, and the gap "
+               "becomes a monitorable intervention.")
 
     st.divider()
 
@@ -795,33 +950,49 @@ def render_parakh():
 
     st.divider()
 
-    # ---- data → decision pipeline ----------------------------------------
-    st.markdown("### 🔁 Why competency-based assessment matters")
-    _flow(["Assessment question", "Competency", "Performance evidence",
-           "Gap detection", "Geographic identification",
-           "Instructional / policy intervention", "Reassessment"])
-    st.caption("The pipeline PARAKH stands for: an exam answer becomes skill "
-               "evidence, evidence becomes a located gap, and the gap "
-               "becomes a monitorable intervention.")
+    # ---- yearly trend with selector --------------------------------------
+    st.markdown("### 📅 Competency trend over the three years")
+    picks = st.multiselect("Competencies", order,
+                           default=[c for c in ("division", "number sense",
+                                                "measurement") if c in order],
+                           key="parakh_comps")
+    if picks:
+        tr = (ca[ca["competency"].isin(picks)]
+              .groupby(["competency", "Year"])
+              .apply(lambda x: np.average(x["acc"], weights=x["n"]),
+                     include_groups=False).rename("acc").reset_index())
+        fig = px.line(tr, x="Year", y="acc", color="competency", markers=True,
+                      labels={"acc": "Accuracy %"})
+        fig.update_layout(height=330, margin=dict(t=8, b=8),
+                          legend=dict(orientation="h", y=-0.28))
+        st.plotly_chart(fig, use_container_width=True)
+        st.caption("⚠️ The paper changes yearly — trends are indicative; a "
+                   "skill low in *every* year (like division) is the robust "
+                   "finding, not small year-to-year wiggles.")
 
     st.divider()
 
-    # ---- recommendation ---------------------------------------------------
-    st.markdown("### 📋 Assessment-driven recommendations")
-    overall = (ca.groupby("competency")
-               .apply(lambda x: np.average(x["acc"], weights=x["n"]),
-                      include_groups=False).sort_values())
-    for comp in overall.index[:3]:
-        cd2 = (cad[cad["competency"] == comp].groupby("District")
-               .apply(lambda x: np.average(x["acc"], weights=x["n"]),
-                      include_groups=False).sort_values())
-        _where = ", ".join(cd2.index[:3])
-        with st.container(border=True):
-            _flow([f"Competency: {comp}",
-                   f"Observed: {overall[comp]:.0f}% statewide",
-                   f"Concentrated: {_where}",
-                   "Persistent across years"
-                   if comp in set(persistent_gaps(df, sig)["competency"])
-                   else "Present in the latest cycle",
-                   f"Recommend: {_suggest(comp).split(' — ')[0]}",
-                   f"Monitor: {comp} accuracy next assessment"])
+    # ---- core: competency × grade matrix ---------------------------------
+    st.markdown("### 🧩 Competency performance matrix")
+    hm = (ca.groupby(["competency", "Grade"])
+          .apply(lambda x: np.average(x["acc"], weights=x["n"]),
+                 include_groups=False).rename("acc").reset_index()
+          .pivot(index="competency", columns="Grade", values="acc")
+          .reindex(order).round(0))
+    hm.columns = [f"Grade {int(c)}" for c in hm.columns]
+    fig = px.imshow(hm, color_continuous_scale="RdYlGn", range_color=[30, 80],
+                    aspect="auto", text_auto=True, height=420,
+                    labels={"color": "% correct"})
+    fig.update_layout(margin=dict(t=6, b=6), coloraxis_showscale=False,
+                      paper_bgcolor="rgba(0,0,0,0)", font=dict(color="#26303e"))
+    st.plotly_chart(fig, use_container_width=True)
+    _flat = (hm.max(axis=1) - hm.min(axis=1)).sort_values()
+    _worst = hm.min(axis=1).sort_values()
+    st.caption(f"Rows = skills, columns = grades, each cell = % of that "
+               f"grade demonstrating the skill (each child scored on their "
+               f"own year's paper). **{_worst.index[0]}** is the weakest "
+               f"skill; **{_flat.index[0]}** barely moves across grades "
+               f"({_flat.iloc[0]:.0f}-pt range) — a skill children are not "
+               f"gaining as they progress.")
+
+    st.divider()

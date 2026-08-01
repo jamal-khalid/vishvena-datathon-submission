@@ -1509,19 +1509,30 @@ st.caption(f"{len(fdf):,} {_row_unit} in current selection"
               if fmt_info.get("reshaped") else "")
            + _src_note)
 
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Average Score", f"{fdf[score_col].mean():.1f}")
-k2.metric("Question responses" if fmt_info.get("reshaped") else "Records",
-          f"{len(fdf):,}",
-          help=(f"{_n_students:,} students × {len(_find_item_columns(items_df)) if items_df is not None else 0} "
-                f"questions. Each row is one answer."
+# Home KPI strip: dataset scale (records · avg · hierarchy counts).
+_hk = {str(c).lower(): c for c in fdf.columns.astype(str)}
+k1, k2, k3, k4, k5, k6 = st.columns(6)
+k1.metric("Records", f"{len(fdf):,}",
+          help=(f"{_n_students:,} students × question responses"
                 if fmt_info.get("reshaped") else None))
-if hierarchy:
-    grp = fdf.groupby(hierarchy[-1])[score_col].mean()
-    if len(grp):
-        k3.metric(f"Best {hierarchy[-1]}", grp.idxmax(), f"{grp.max():.1f}")
-        k4.metric(f"Weakest {hierarchy[-1]}", grp.idxmin(), f"{grp.min():.1f}",
-                  delta_color="inverse")
+k2.metric("Average Score", f"{fdf[score_col].mean():.1f}")
+k3.metric("Districts",
+          fdf[_hk["district"]].nunique() if "district" in _hk else "—",
+          help="Administrative districts (educational districts like "
+               "Chikkodi, Madhugiri and Sirsi are counted inside their "
+               "parents).")
+k4.metric("Blocks",
+          fdf.groupby([_hk["district"], _hk["block"]]).ngroups
+          if {"district", "block"} <= _hk.keys() else "—",
+          help="Distinct district + block combinations.")
+k5.metric("Clusters",
+          f"{fdf.groupby([_hk['district'], _hk['block'], _hk['cluster']]).ngroups:,}"
+          if {"district", "block", "cluster"} <= _hk.keys() else "—",
+          help="Distinct district + block + cluster combinations.")
+_gpc = _hk.get("gp id") or _hk.get("gp name") or _hk.get("gp")
+k6.metric("Gram Panchayats",
+          f"{fdf[_gpc].nunique():,}" if _gpc else "—",
+          help="Distinct GP IDs (names repeat across clusters).")
 
 tabs = st.tabs(["🌞 Hierarchy",
                 # GKA's Impact sits second on purpose: "is the programme
