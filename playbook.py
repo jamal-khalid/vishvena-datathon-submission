@@ -475,6 +475,7 @@ def _context_features(ctx, district):
         return None
     try:
         import insights_cross as X
+        import secondary as _S
     except Exception:
         return None
     key, out_col = ctx.get("key", "District"), ctx.get("outcome_label")
@@ -505,7 +506,14 @@ def _context_features(ctx, district):
         ctrls = [c for c in fit.get("controls", []) if c in m.columns]
         if len(ctrls) >= 2:
             d = m[[key, out_col] + ctrls].dropna()
-            hit = d[d[key].astype(str).str.strip().str.lower() == unit.lower()]
+            # resolved via S.match_district(), not a plain equality — the
+            # join stores rows under the CONTEXT FILE's spelling ("bagalkot"),
+            # so looking up the assessment file's own canonical name
+            # ("Bagalkote") needs the same alias+loose-key resolution the
+            # join used, or the row is missed even though it exists
+            _resolved = _S.match_district(unit, d[key].astype(str)
+                                          .unique().tolist())
+            hit = d[d[key].astype(str) == _resolved] if _resolved else d.iloc[0:0]
             if not hit.empty and len(d) >= 6:
                 i = hit.index[0]
                 Z = d[ctrls].astype(float)
@@ -518,6 +526,191 @@ def _context_features(ctx, district):
                     info["peer_pct"] = float(d.loc[peers, out_col].mean())
                     info["unit_pct"] = float(d.loc[i, out_col])
     return info
+
+
+# =========================================================== resource gaps
+# District-level, quantified resource statements — "this district's PTR is
+# 42 against a state median of 31; closing that gap needs ~120 teachers."
+#
+# These are RESOURCE-EQUITY facts, not fixes for below-grade-level rates.
+# Checked against this file: only Per Capita Income survives significance
+# testing against the outcome (see insights_cross.table / _mod_ctx_under and
+# _mod_ctx_over, which already carry that causal-toned message). PTR, library
+# density, and connectivity do NOT — so a sentence here never claims closing
+# the gap will raise scores, only that the gap exists and how big it is.
+# Akshara's own Aspirational-Districts framing cares about resource equity on
+# its own terms, independent of whether it happens to predict this outcome.
+#
+# Two items sometimes asked for are deliberately NOT here:
+#   "Build N digital classrooms"  — needs a total-schools count to turn
+#       Computer Available/Internet into a target ratio; the file has none,
+#       so any such number would be invented, not computed.
+#   "Female literacy campaign, N%" — Rural/Urban Female Literacy in this file
+#       are POPULATION COUNTS (180,920 to 1,203,960), not rates, and there is
+#       no population denominator to convert them into a percentage. Ranking
+#       the raw counts would really be ranking district SIZE, which is exactly
+#       the count-vs-rate mistake this codebase has already been fixed for
+#       elsewhere — better to omit than to silently reintroduce it.
+# Each returned dict carries "action" (imperative, what to do), "why"
+# (justifies PRIORITISING it — gap size and children affected, never an
+# outcome claim), "priority" (High/Moderate/Low, from relative gap size), and
+# "note" (the honesty caveat: no proven link to below-grade-level rate).
+def resource_gaps(context, district):
+    """
+    Quantified GPT-style resource sentences ("recruit N teachers", "N more
+    libraries"), computed from the district-context file rather than templated
+    guesses. Returns [] when there is no context file, no match, or nothing
+    to report (already at or above the state median on every measured item).
+    """
+    if not context:
+        return []
+    m = context.get("merged")
+    key = context.get("key", "District")
+    if m is None or key not in m.columns:
+        return []
+    # resolved via S.match_district(), not a plain equality — see
+    # _context_features for why a naive check misses rows the join filed
+    # under a different (but equivalent) spelling, e.g. "Bagalkote" vs the
+    # context file's "bagalkot"
+    try:
+        import secondary as _S
+        _resolved = _S.match_district(str(district).strip(),
+                                      m[key].astype(str).unique().tolist())
+    except Exception:
+        _resolved = None
+    if not _resolved:
+        return []
+    hit = m[m[key].astype(str) == _resolved]
+    if hit.empty:
+        return []
+    row = hit.iloc[0]
+    out = []
+
+    # ---- teachers, against the STATE'S OWN median PTR ----------------------
+    # The reported "Student Teacher Ratio" does not divide by the obviously-
+    # named teacher column: Enrolment / "Primary+Upper Primary Teachers
+    # (Total)" gives 58 where the file reports 27; the column that actually
+    # reproduces it is "Primary Teachers Total". Finding the denominator FROM
+    # THE DATA (as insights_cross.py already does for exactly this reason)
+    # avoids repeating that exact, previously-caught mistake.
+    ptr_col, enrol_col = "Student Teacher Ratio", "Student Enrolment"
+    if ptr_col in m.columns and enrol_col in m.columns:
+        try:
+            import insights_cross as _X
+            teach_col = _X._ratio_weight(ptr_col, m)
+        except Exception:
+            teach_col = None
+        if teach_col and teach_col in m.columns:
+            ptr = pd.to_numeric(row.get(ptr_col), errors="coerce")
+            teachers = pd.to_numeric(row.get(teach_col), errors="coerce")
+            enrol = pd.to_numeric(row.get(enrol_col), errors="coerce")
+            med_ptr = pd.to_numeric(m[ptr_col], errors="coerce").median()
+            if (pd.notna(ptr) and pd.notna(teachers) and pd.notna(enrol)
+                    and med_ptr and med_ptr > 0 and ptr > med_ptr):
+                needed = int(round(enrol / med_ptr - teachers))
+                if needed > 0:
+                    over_by = ptr / med_ptr - 1.0
+                    out.append({
+                        "metric": "Student-Teacher Ratio",
+                        "value": f"{ptr:.0f} students per teacher",
+                        "action": "Recruit additional teachers",
+                        "why": (
+                            f"{district}'s Student-Teacher Ratio is "
+                            f"{ptr:.0f} against a state median of "
+                            f"{med_ptr:.0f} — {over_by * 100:.0f}% above "
+                            f"median — across {int(enrol):,} enrolled "
+                            f"children. Closing the gap needs roughly "
+                            f"{needed:,} more teachers, one of the larger "
+                            f"PTR gaps in the state by children affected."),
+                        "priority": ("High" if over_by >= 0.30 else
+                                    "Moderate" if over_by >= 0.10 else "Low"),
+                        "sentence": (
+                            f"{district}'s Student-Teacher Ratio is "
+                            f"{ptr:.0f}, against the state median of "
+                            f"{med_ptr:.0f}. Closing that gap for its "
+                            f"{int(enrol):,} enrolled students would need "
+                            f"roughly {needed:,} additional teachers."),
+                        "has_outcome_link": False,
+                        "note": "PTR is not a significant predictor of "
+                                "below-grade-level rate in this file (fails "
+                                "FDR correction) — a resource-equity gap, "
+                                "not a claim it will raise scores."})
+
+    # ---- libraries, per 1,000 enrolled children -----------------------------
+    lib_col = "Total Libraries"
+    if lib_col in m.columns and enrol_col in m.columns:
+        libs = pd.to_numeric(row.get(lib_col), errors="coerce")
+        enrol = pd.to_numeric(row.get(enrol_col), errors="coerce")
+        rate = (pd.to_numeric(m[lib_col], errors="coerce")
+                / pd.to_numeric(m[enrol_col], errors="coerce") * 1000)
+        med_rate = rate.median()
+        if (pd.notna(libs) and pd.notna(enrol) and enrol > 0
+                and med_rate and med_rate > 0):
+            cur_rate = libs / enrol * 1000
+            if cur_rate < med_rate:
+                needed = int(round(med_rate * enrol / 1000 - libs))
+                if needed > 0:
+                    short_by = 1.0 - cur_rate / med_rate
+                    out.append({
+                        "metric": "Libraries",
+                        "value": f"{cur_rate:.2f} per 1,000 children",
+                        "action": "Build or open more libraries",
+                        "why": (
+                            f"{district} has {cur_rate:.2f} libraries per "
+                            f"1,000 children against a state median of "
+                            f"{med_rate:.2f} — {short_by * 100:.0f}% short "
+                            f"of median — for {int(enrol):,} enrolled "
+                            f"children. Reaching the median needs about "
+                            f"{needed:,} more libraries."),
+                        "priority": ("High" if short_by >= 0.40 else
+                                    "Moderate" if short_by >= 0.15 else "Low"),
+                        "sentence": (
+                            f"{district} has {libs:.0f} libraries for "
+                            f"{int(enrol):,} enrolled children "
+                            f"({cur_rate:.2f} per 1,000), against the "
+                            f"state median of {med_rate:.2f} per 1,000. "
+                            f"Reaching the median would need about "
+                            f"{needed} more libraries."),
+                        "has_outcome_link": False,
+                        "note": "Library density is not a significant "
+                                "predictor of below-grade-level rate in "
+                                "this file — a resource-equity gap, not a "
+                                "claim about outcomes."})
+
+    # ---- connectivity — rank only; the file has no total-schools count to
+    # turn "Internet"/"Computer Available" into a defensible percentage ------
+    for col, label in (("Internet", "internet-connected schools"),
+                       ("Computer Available", "schools with computers")):
+        if col not in m.columns:
+            continue
+        v = pd.to_numeric(row.get(col), errors="coerce")
+        s = pd.to_numeric(m[col], errors="coerce")
+        n = int(s.notna().sum())
+        if pd.isna(v) or n < 5:
+            continue
+        rank = int((s < v).sum()) + 1              # 1 = fewest in the state
+        if rank <= max(3, n // 4):                  # bottom quartile
+            out.append({
+                "metric": label.title(),
+                "value": f"rank {rank} of {n}",
+                "action": f"Prioritise {label} for connectivity investment",
+                "why": (
+                    f"{district} ranks {rank} of {n} districts for "
+                    f"{label} — among the least connected in the state. "
+                    f"(Reported as a rank, not a percentage: the file has "
+                    f"no total-schools count to divide by, so an "
+                    f"'increase to N%' target cannot be honestly stated.)"),
+                "priority": "High" if rank <= 2 else "Moderate",
+                "sentence": (
+                    f"{district} ranks {rank} of {n} districts for "
+                    f"{label} — among the least connected in the state. "
+                    f"(Reported as a rank, not a percentage: the file has "
+                    f"no total-schools count to divide by.)"),
+                "has_outcome_link": False,
+                "note": "no measured link to below-grade-level rate in "
+                        "this file — a digital-infrastructure equity "
+                        "signal only"})
+    return out
 
 
 def _bh(pvals):

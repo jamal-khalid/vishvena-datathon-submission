@@ -254,13 +254,24 @@ def prepare(agg, secondary_df, outcome_label="Below grade level (%)",
 
 
 def _resid_row(ctx, district):
-    """This district's row in the peer-adjusted table, or None."""
+    """
+    This district's row in the peer-adjusted table, or None.
+
+    Matched via S.match_district(), not a plain case-insensitive equality:
+    the join stores rows under the CONTEXT FILE's spelling ("bagalkot"), so a
+    caller looking up the assessment file's own canonical spelling
+    ("Bagalkote") must be resolved through the same alias+loose-key rules the
+    join itself used — a naive `.lower()` check silently misses it.
+    """
     r = ctx.get("residuals")
     if r is None or r.empty:
         return None
     k = ctx["key"]
-    hit = r[r[k].astype(str).str.strip().str.lower()
-            == str(district).strip().lower()]
+    cands = r[k].astype(str).unique().tolist()
+    resolved = S.match_district(str(district).strip(), cands)
+    if resolved is None or resolved not in cands:
+        return None
+    hit = r[r[k].astype(str) == resolved]
     return None if hit.empty else hit.iloc[0]
 
 
@@ -293,8 +304,13 @@ def _loo_residual(ctx, district):
     d = m[[key, out_col] + ctrls].apply(
         lambda s: pd.to_numeric(s, errors="coerce") if s.name != key else s)
     d = d.dropna()
-    mask = (d[key].astype(str).str.strip().str.lower()
-            == str(district).strip().lower())
+    # resolved via S.match_district(), not a plain equality — see _resid_row
+    # for why a naive check misses rows the join filed under a different
+    # (but equivalent) spelling
+    _resolved = S.match_district(str(district).strip(),
+                                 d[key].astype(str).unique().tolist())
+    mask = (d[key].astype(str) == _resolved) if _resolved else pd.Series(
+        False, index=d.index)
     if not mask.any() or len(d) < len(ctrls) + 4:
         return None, None
 

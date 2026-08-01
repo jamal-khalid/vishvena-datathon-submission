@@ -1736,6 +1736,10 @@ def _c_playbook_coverage_v3(_agg, agg_sig, district, min_n=30,
                                      context=_context)
 
 @st.cache_data(show_spinner=False)
+def _c_resource_gaps(_context, ctx_sig, district):
+    return L_playbook.resource_gaps(_context, district)
+
+@st.cache_data(show_spinner=False)
 def _c_playbook_recommend(_agg, agg_sig, district, limit=12):
     return L_playbook.recommend(_agg, district, limit=limit)
 
@@ -5079,6 +5083,39 @@ with tabs[14]:
                             help="Actions whose advice changed because of the "
                                  "cross-dataset join.")
 
+            # ---- resource equity: quantified, district-level, secondary-data
+            # sentences, distinct from the evidence-scored block recommendations
+            # below. These say what is SHORT, never that filling it will raise
+            # scores — the one secondary variable proven to matter (income) is
+            # already folded into the recommendations above via ctx_under/over.
+            _gaps = _c_resource_gaps(_actx, _asig, d_act) if _actx else []
+            if _gaps:
+                with st.expander(
+                        f"📐 Resource equity — {d_act} against the state "
+                        f"median ({len(_gaps)})", expanded=False):
+                    st.caption(
+                        "Quantified from the district-context file: what this "
+                        "district is short of, and by how much, relative to "
+                        "the STATE'S OWN median — not an external policy "
+                        "target. **These are resource-equity facts, not "
+                        "claims that closing them will raise scores** — of "
+                        "everything in the secondary file, only Per Capita "
+                        "Income measurably predicts the outcome here (see "
+                        "🔗 Cross-dataset); that link is already reflected in "
+                        "the recommendations below, not repeated here.")
+                    _pri_order = {"High": 0, "Moderate": 1, "Low": 2}
+                    for _g in sorted(_gaps,
+                                     key=lambda g: _pri_order.get(
+                                         g.get("priority", "Low"), 2)):
+                        _pri = _g.get("priority", "Moderate")
+                        _dot = {"High": "🔴", "Moderate": "🟠",
+                               "Low": "🟢"}.get(_pri, "🟠")
+                        st.markdown(f"{_dot} **{_pri}** — "
+                                   f"✅ {_g.get('action', _g['metric'])}")
+                        st.write(_g.get("why", _g["sentence"]))
+                        st.caption(f"↳ {_g['note']}")
+                        st.markdown("")
+
             recs = _c_playbook_recommend_v3(AGG, AGG_SIG, d_act, limit=12,
                                             min_n=MINN, _context=_actx,
                                             ctx_sig=_asig)
@@ -5451,45 +5488,24 @@ with tabs[12]:
         if _needs_agg():
             return
 
-        # ---- pick the context file --------------------------------------
-        _sec_dir = os.path.dirname(_HERE)
-        _sec_local = [f for f in _scan_local(_sec_dir)
-                      if any(k in f.lower() for k in
-                             ("secondary", "context", "district", "census",
-                              "merged"))]
-        c1, c2 = st.columns([1.2, 1])
-        with c1:
-            _sec_up = st.file_uploader(
-                "District context file (one row per district)",
-                type=["xlsx", "xls", "csv"], key="xds_up",
-                help="Needs a District column plus numeric indicators — "
-                     "income, literacy, teacher counts, libraries…")
-        with c2:
-            _sec_pick = st.selectbox("…or one already on disk",
-                                     ["(none)"] + _sec_local, key="xds_local")
-
+        # ---- the context file: PRE-LOADED, no upload -----------------------
+        # secondary_dataset.xlsx ships fixed with the app. An uploader here
+        # was a leftover from before it was bundled, and offering an override
+        # invites a stray file to silently change every cross-dataset finding,
+        # recommendation, and brief on judging day. The Insights and Action
+        # Plan tabs already read this same file unconditionally via
+        # _find_context_file() — this tab now matches that, so there is one
+        # loading path instead of two that could disagree.
+        _default_sec = os.path.join(_HERE, "secondary_dataset.xlsx")
         _sec_df = None
-        if _sec_up is not None:
-            _sec_df = (pd.read_csv(_sec_up)
-                       if _sec_up.name.lower().endswith(".csv")
-                       else pd.read_excel(_sec_up))
-        elif _sec_pick != "(none)":
-            _p = os.path.join(_sec_dir, _sec_pick)
-            _sec_df = (pd.read_csv(_p) if _p.lower().endswith(".csv")
-                       else pd.read_excel(_p))
-        else:
-            # PRE-LOADED default: the fixed secondary dataset ships with the
-            # app and never changes — no upload needed. The uploader above
-            # remains as an override only.
-            _default_sec = os.path.join(_HERE, "secondary_dataset.xlsx")
-            if os.path.exists(_default_sec):
-                _sec_df = pd.read_excel(_default_sec)
-                st.success("📎 Using the built-in secondary dataset "
-                           "(secondary_dataset.xlsx) — upload a file above "
-                           "only to override it.")
+        if os.path.exists(_default_sec):
+            _sec_df = pd.read_excel(_default_sec)
+            st.caption(f"📎 Using the built-in secondary dataset "
+                       f"(secondary_dataset.xlsx, {len(_sec_df)} districts).")
 
         if _sec_df is None:
-            st.info("⬆️ Upload a district-level context file to run the analysis.")
+            st.error("⚠️ secondary_dataset.xlsx is missing from the app "
+                     "folder — the cross-dataset analysis cannot run.")
             return
 
         # ---- build the district-level outcome ---------------------------

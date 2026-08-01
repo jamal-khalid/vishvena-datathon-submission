@@ -281,6 +281,29 @@ def align_districts(names, targets, cutoff=0.88):
                      "matched": len(names) - len(unmatched), "total": len(names)}
 
 
+def match_district(name, candidates):
+    """
+    Resolve `name` to whichever string in `candidates` it refers to, using the
+    SAME alias table + loose-key rules align_districts() uses for the join —
+    not a plain case-insensitive equality.
+
+    Why this exists: prepare()'s join REPLACES the assessment file's district
+    spelling with the context file's before merging, so a row the join filed
+    under "bagalkot" or "kalaburgi" no longer matches "Bagalkote" or
+    "Kalaburagi" — the assessment file's OWN canonical names — under a naive
+    `.lower()` check. That check silently failed for 4 of 28 districts here
+    (Bagalkote, Kalaburagi, Vijayanagara, Yadgir), each losing its peer
+    benchmark, ctx_over/ctx_under clause, and resource-equity section with no
+    error — the caller just saw zero context-driven output for that district.
+    Two of the four (Kalaburagi/kalaburgi, Yadgir/yadagiri) differ in the
+    MIDDLE of the word, so even the loose trailing-vowel key alone would not
+    have caught them — only the alias table does, which is why this reuses
+    align_districts() rather than a plain _dkey() comparison.
+    """
+    amap, _ = align_districts([name], candidates)
+    return amap.get(name)
+
+
 # ------------------------------------------------------------------- join
 def join(primary, secondary, key="District"):
     """
