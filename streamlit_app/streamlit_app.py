@@ -131,6 +131,12 @@ div[data-testid="stMetricDelta"] * { font-size: 13px !important; }
     border: 1.5px dashed #c6cdd8 !important; border-radius: 12px; }
 [data-testid="stAlert"] { border-radius: 12px; }
 [data-testid="stHeader"] { background: #f2f4f8; }
+[data-testid="stProgress"] > div > div {
+    background: #dfe5ee !important; border-radius: 999px;
+    height: 12px !important; }
+[data-testid="stProgress"] > div > div > div {
+    background: linear-gradient(90deg, #0F6E56, #10B981) !important;
+    border-radius: 999px; }
 .stCode, pre, code { background: #f0f4f2 !important;
     color: #0a5340 !important; border-radius: 8px !important; }
 </style>
@@ -203,7 +209,7 @@ def _expand(name, src):
             yield f"{os.path.basename(name)}:{base}", io.BytesIO(z.read(info))
 
 
-@st.cache_data(show_spinner="Reading data…")
+@st.cache_data(show_spinner=False)
 def load_many(_sources, sig):
     """
     Read one or many files into a single frame.
@@ -219,8 +225,14 @@ def load_many(_sources, sig):
     Returns (combined_frame, manifest) where manifest has one row per part.
     """
     frames, manifest = [], []
+    _n_src = max(len(_sources), 1)
+    _pb = st.progress(0.0, text="📖 Reading your dataset…")
 
-    for name, src in _sources:
+    for _si, (name, src) in enumerate(_sources):
+        _pb.progress(min(max(_si / _n_src, 0.12), 0.95),
+                     text=f"📖 Reading {name} — part {_si + 1} of {_n_src}. "
+                          "Large Excel files take a while; Parquet/CSV are "
+                          "much faster.")
         for member, handle in _expand(name, src):
             try:
                 part = _read_one(member, handle)
@@ -239,8 +251,10 @@ def load_many(_sources, sig):
                              "_self_dupes": int(part.duplicated().sum())})
 
     if not frames:
+        _pb.empty()
         return None, manifest
 
+    _pb.progress(0.97, text="🧩 Combining parts into one dataset…")
     if len(frames) == 1:
         df = frames[0]
     else:
@@ -276,6 +290,8 @@ def load_many(_sources, sig):
               pd.concat([f.reindex(columns=all_cols) for f in frames],
                         ignore_index=True, sort=False))
 
+    _pb.progress(1.0, text="✅ Dataset ready")
+    _pb.empty()
     return df, manifest
 
 
@@ -511,9 +527,17 @@ _qm_up = st.sidebar.file_uploader(
 _qm_bytes = None
 if _qm_up is not None:
     _qm_bytes = _qm_up.getvalue()
+    try:
+        os.makedirs(os.path.join(_HERE, "_upload_cache"), exist_ok=True)
+        with open(os.path.join(_HERE, "_upload_cache",
+                               "qmap_override.csv"), "wb") as _qf:
+            _qf.write(_qm_bytes)
+    except Exception:
+        pass
 else:
     import pathlib as _qpl
-    for _cand in ("DATATHON_QUESTION_MAP.csv", "question_map.csv"):
+    for _cand in (os.path.join("_upload_cache", "qmap_override.csv"),
+                  "DATATHON_QUESTION_MAP.csv", "question_map.csv"):
         _p = _qpl.Path(__file__).parent / _cand
         if _p.exists():
             _qm_bytes = _p.read_bytes()
@@ -586,6 +610,56 @@ if _local_files:
             _picked_local = [os.path.join(_DATA_DIR, f) for f in _local_files
                              if os.path.dirname(f) == _fp]
 
+# ---- refresh-proof uploads: restore the last browser upload from cache ---
+_UPLOAD_CACHE = os.path.join(_HERE, "_upload_cache")
+_CACHE_FILE = os.path.join(_UPLOAD_CACHE, "last_upload.parquet")
+
+# Remember whether an upload happened IN THIS SESSION. If it did and the
+# uploader is now empty, the user clicked ✕ — that means "unload", so the
+# cache must go too instead of resurrecting the file. A refresh starts a
+# new session (flag resets) and restore works as intended.
+if uploaded:
+    st.session_state["_had_upload"] = True
+elif st.session_state.get("_had_upload"):
+    for _p in (_CACHE_FILE, _CACHE_FILE + ".meta.json"):
+        try:
+            os.remove(_p)
+        except OSError:
+            pass
+    st.session_state.pop("_pcache_sig", None)
+
+if (not uploaded and not _picked_local and os.path.exists(_CACHE_FILE)
+        and not st.session_state.get("_had_upload")):
+    _picked_local = [_CACHE_FILE]
+    try:
+        import json as _json
+        with open(_CACHE_FILE + ".meta.json") as _mf:
+            _meta = _json.load(_mf)
+    except Exception:
+        _meta = {}
+    _mnames = "<br>".join(f"📄 {n}" for n in _meta.get("names", []))         or "📄 last uploaded dataset"
+    _mrows = _meta.get("rows")
+    st.sidebar.markdown(
+        f"<div style='background:#1F2937; border:1px solid #374151; "
+        f"border-left:3px solid #10B981; border-radius:10px; "
+        f"padding:10px 12px; margin:4px 0 8px;'>"
+        f"<div style='color:#10B981; font-size:11px; font-weight:700; "
+        f"letter-spacing:.5px;'>♻️ RESTORED — REFRESH-PROOF</div>"
+        f"<div style='color:#E5E7EB; font-size:13px; font-weight:600; "
+        f"overflow-wrap:anywhere;'>{_mnames}</div>"
+        + (f"<div style='color:#9CA3AF; font-size:12px;'>{_mrows:,} rows"
+           f"</div>" if _mrows else "")
+        + "<div style='color:#9CA3AF; font-size:11px;'>Upload again to "
+          "replace.</div></div>", unsafe_allow_html=True)
+    if st.sidebar.button("🗑️ Forget restored dataset"):
+        try:
+            os.remove(_CACHE_FILE)
+            os.remove(_CACHE_FILE + ".meta.json")
+        except OSError:
+            pass
+        st.session_state.pop("_pcache_sig", None)
+        st.rerun()
+
 if not uploaded and not _picked_local:
     st.title("📊 Education Insights Dashboard")
     st.info("⬅️ Upload your dataset to begin, or pick files already on disk. "
@@ -623,6 +697,21 @@ if df is None or df.empty:
     if _manifest:
         st.dataframe(pd.DataFrame(_manifest), use_container_width=True)
     st.stop()
+
+# Persist browser uploads to a local Parquet cache (once per file set) so a
+# page refresh — which wipes Streamlit's upload widget — restores instantly.
+if uploaded and st.session_state.get("_pcache_sig") != _fsig:
+    try:
+        with st.spinner("💾 Saving a refresh-proof copy…"):
+            os.makedirs(_UPLOAD_CACHE, exist_ok=True)
+            df.to_parquet(_CACHE_FILE, index=False)
+            import json as _json
+            with open(_CACHE_FILE + ".meta.json", "w") as _mf:
+                _json.dump({"names": [n for n, _ in _sources],
+                            "rows": int(len(df))}, _mf)
+        st.session_state["_pcache_sig"] = _fsig
+    except Exception:
+        pass          # caching is best-effort; analysis continues either way
 
 # Show what actually got combined — with several parts, a silently skipped or
 # short file is the easiest way to analyse the wrong dataset without noticing.
