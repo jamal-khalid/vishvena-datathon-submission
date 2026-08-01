@@ -431,11 +431,24 @@ def _css():
     except Exception:
         pass
     st.markdown("""<style>
-    .mi-flow { display:flex; align-items:center; flex-wrap:wrap; gap:6px; }
+    .mi-flow { display:flex; flex-wrap:wrap; align-items:stretch;
+        gap:10px 0; }
+    .mi-item { display:inline-flex; align-items:center; gap:8px;
+        margin:4px 10px 4px 0; max-width:100%; }
     .mi-step { background:#ffffff; border:1px solid #e6e9ef;
-        border-radius:8px; padding:8px 14px; font-size:13px;
-        font-weight:600; color:#26303e; }
-    .mi-arrow { color:#98a2b3; font-weight:700; }
+        border-radius:10px; padding:9px 14px; font-size:13px;
+        font-weight:600; color:#26303e; line-height:1.45;
+        max-width:320px; word-wrap:break-word; }
+    .mi-step .mi-badge { display:block; font-size:10px; font-weight:800;
+        letter-spacing:.5px; text-transform:uppercase; margin-bottom:3px; }
+    .mi-badge-data { color:#1d4ed8; }
+    .mi-badge-insight { color:#475569; }
+    .mi-badge-risk { color:#b45309; }
+    .mi-badge-recommend { color:#0a7a5c; }
+    .mi-badge-monitor { color:#7c3aed; }
+    .mi-badge-default { color:#67707f; }
+    .mi-arrow { color:#b7bec9; font-weight:700; font-size:15px;
+        flex:0 0 auto; }
     .mi-tag { display:inline-block; padding:2px 10px; border-radius:999px;
         font-size:11px; font-weight:700; letter-spacing:.4px; }
     </style>""", unsafe_allow_html=True)
@@ -459,12 +472,35 @@ def _header(title, subtitle, note):
     st.caption(note)
 
 
+_FLOW_BADGE = {
+    "DATA": "data", "COMPETENCY": "data",
+    "INSIGHT": "insight", "OBSERVED": "insight", "CONCENTRATED": "insight",
+    "RISK": "risk",
+    "RECOMMEND": "recommend", "RECOMMENDATION": "recommend",
+    "MONITOR": "monitor",
+}
+_FLOW_LABEL_RE = re.compile(r"^([A-Za-z][A-Za-z ]{1,14}):\s*(.*)$", re.S)
+
+
 def _flow(steps):
-    html = "<div class='mi-flow'>"
-    html += "<span class='mi-arrow'>→</span>".join(
-        f"<span class='mi-step'>{s}</span>" for s in steps)
-    html += "</div>"
-    st.markdown(html, unsafe_allow_html=True)
+    """Render a data->decision chain as wrapping chips. Each arrow is
+    bundled with the step that follows it (one atomic flex item), so a
+    wrap never strands an arrow alone at the end of a line."""
+    parts = []
+    for i, s in enumerate(steps):
+        m = _FLOW_LABEL_RE.match(s)
+        if m:
+            label, rest = m.group(1), m.group(2)
+            cls = _FLOW_BADGE.get(label.upper(), "default")
+            body = (f"<span class='mi-badge mi-badge-{cls}'>"
+                    f"{label.upper()}</span>{rest}")
+        else:
+            body = s
+        arrow = "<span class='mi-arrow'>→</span>" if i else ""
+        parts.append(f"<span class='mi-item'>{arrow}"
+                     f"<span class='mi-step'>{body}</span></span>")
+    st.markdown("<div class='mi-flow'>" + "".join(parts) + "</div>",
+               unsafe_allow_html=True)
 
 
 def _load_geo():
