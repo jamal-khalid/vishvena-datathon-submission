@@ -2955,15 +2955,32 @@ with tabs[3]:
                                                        comp].mean(),
                                     "Male": _csf.loc[_gg["_g"] == "Male",
                                                      comp].mean()})
-                            _by = pd.DataFrame(_rows).set_index("Competency")
+                            # comp_score_frame drops competencies that are all
+                            # NaN for this slice, so it can legitimately come
+                            # back with no columns — a gender filter leaving
+                            # one paper, or a slice whose year/grade matches no
+                            # paper at all. set_index on an empty list then
+                            # raises and takes every tab after this one with
+                            # it, which is how a narrow filter looked like a
+                            # broken app.
+                            _by = (pd.DataFrame(_rows).set_index("Competency")
+                                   if _rows else None)
                             _dim = "Competency"
+                            if _by is None:
+                                st.info(
+                                    "No competency could be scored for this "
+                                    "selection — the questions in view do not "
+                                    "map to a competency in the paper(s) this "
+                                    "slice covers. Switch the breakdown to "
+                                    "Item, or widen the filters.")
                         else:
                             for q in _qg:
                                 _rows.append({
                                     "Item": q,
                                     "Female": _gg.loc[_gg["_g"] == "Female", q].mean() * 100,
                                     "Male": _gg.loc[_gg["_g"] == "Male", q].mean() * 100})
-                            _by = pd.DataFrame(_rows).set_index("Item")
+                            _by = (pd.DataFrame(_rows).set_index("Item")
+                                   if _rows else None)
                             _dim = "Item"
                     else:
                         _by = None
