@@ -133,6 +133,10 @@ div[data-testid="stMetricDelta"] * { font-size: 13px !important; }
     border: 1.5px dashed #c6cdd8 !important; border-radius: 12px; }
 [data-testid="stAlert"] { border-radius: 12px; }
 [data-testid="stHeader"] { background: #f2f4f8; }
+/* Data tab hidden per request — code intact; delete this rule to restore.
+   nth-of-type(9) = 9th tab BUTTON: 🗂️ Data (nth-of-type ignores the
+   non-button highlight element inside the tab bar) */
+[data-baseweb="tab-list"] button:nth-of-type(9) { display: none !important; }
 [data-testid="stProgress"] > div > div {
     background: #dfe5ee !important; border-radius: 999px;
     height: 12px !important; }
@@ -1272,8 +1276,11 @@ def competency_question_filter(frame, key, box=None, show=True):
             _paper = (str(_ys[0]), int(_gs[0]))
 
     if RQMAPS:
-        if _paper and _paper in RQMAPS:
-            cmap = {q: RQMAPS[_paper].get(str(q), str(q)) for q in qs}
+        _rqn_all = _rq_norm(RQMAPS)
+        _pk = ((_year_key(_paper[0]), int(_paper[1]))
+               if _paper else None)
+        if _pk and _pk in _rqn_all:
+            cmap = {q: _rqn_all[_pk].get(str(q), str(q)) for q in qs}
         else:
             cmap = {q: str(q) for q in qs}      # ambiguous across papers
         comps = sorted({c for m in RQMAPS.values() for c in m.values()})
@@ -3596,8 +3603,18 @@ with tabs[5]:
                 with dc2:
                     # unit vs everyone, per skill — works on the melted shape
                     # too, and rolls up to named competencies when a map exists
-                    _ov = question_means(ddf, QF, _dd_by)
-                    _un = question_means(_sub, QF, _dd_by)
+                    if RQMAPS:
+                        # papers differ per year+grade: Q-level comparison
+                        # would mix unrelated questions, so compare by
+                        # COMPETENCY, each child scored on their own paper
+                        _qdd = [q for q in QF["questions"]
+                                if q in ddf.columns]
+                        _ov = comp_score_frame(ddf, _qdd, RQMAPS).mean()
+                        _un = comp_score_frame(_sub, _qdd, RQMAPS).mean()
+                        _dd_by = "Competency"
+                    else:
+                        _ov = question_means(ddf, QF, _dd_by)
+                        _un = question_means(_sub, QF, _dd_by)
                     _dlt = (_un - _ov).dropna()
                     if len(_dlt):
                         _worst_gap = float(_dlt.min())
@@ -3798,10 +3815,12 @@ with tabs[5]:
                         hovertemplate="<b>%{y}</b><br>%{x:.0f}% of children"
                                       "<extra>%{fullData.name}</extra>")
                     figb2.update_layout(
-                        barmode="stack", title=f"Same data — who is in each band",
-                        yaxis_title="", margin=dict(t=40, b=10),
-                        legend=dict(orientation="h", yanchor="bottom", y=1.02,
-                                    x=0, font=dict(size=11)))
+                        barmode="stack",
+                        title=dict(text="Same data — who is in each band",
+                                   y=0.98, x=0, xanchor="left"),
+                        yaxis_title="", margin=dict(t=90, b=10),
+                        legend=dict(orientation="h", yanchor="bottom",
+                                    y=-0.22, x=0, font=dict(size=11)))
                     figb2.update_xaxes(ticksuffix="%", range=[0, 100])
                     st.plotly_chart(figb2, use_container_width=True)
                     _wq = _rank.index[0]
@@ -3867,19 +3886,31 @@ with tabs[6]:
                 st.caption(f"{_hidden} {unit}(s) with fewer than {RMIN_N} students "
                            "excluded — tiny groups top rankings by pure luck.")
 
-        # Early-warning alerts: units declining across years
+        # Early-warning alerts: units whose STANDING falls across years.
+        # Raw scores can't be compared across years (a new paper is set each
+        # year and the whole state's raw average moves with its difficulty),
+        # so decline = percentile among same-year peers dropping every year —
+        # a unit genuinely losing ground regardless of the paper.
         if unit and year_col and fdf[year_col].nunique() > 1:
-            st.subheader("🚨 Early-Warning: consistently declining")
-            pv = fdf.pivot_table(index=unit, columns=year_col, values=score_col, aggfunc="mean")
-            pv = pv.dropna()
-            pv = pv[pv.index.isin(eligible)]   # same min-N guard as the rankings
-            declining = pv[pv.diff(axis=1).iloc[:, 1:].lt(0).all(axis=1)]
+            st.subheader("🚨 Early-Warning: losing ground every year")
+            pv = fdf.pivot_table(index=unit, columns=year_col,
+                                 values=score_col, aggfunc="mean")
+            pv = pv.dropna()                    # balanced panel: units
+            pv = pv[pv.index.isin(eligible)]    # covered in every year
+            pvp = pv.rank(pct=True) * 100       # percentile per year column
+            declining = pvp[pvp.diff(axis=1).iloc[:, 1:].lt(0).all(axis=1)]
             if len(declining):
                 for name, row in declining.iterrows():
-                    trail = " → ".join(f"{v:.1f}" for v in row.values)
-                    st.error(f"**{name}** declining every year: {trail}")
+                    trail = " → ".join(f"{v:.0f}th" for v in row.values)
+                    st.error(f"**{name}** — percentile among peers falling "
+                             f"every year: {trail}")
+                st.caption("Percentile = standing among all units that sat "
+                           "the same year's paper (units covered in every "
+                           "year only) — immune to papers getting easier "
+                           "or harder.")
             else:
-                st.success("No unit is declining across every year in the current selection.")
+                st.success("No unit is losing ground against its peers "
+                           "every year in the current selection.")
 
         # Quadrant scatter: current level vs 3-year change (proto-prediction view)
         if unit and year_col and fdf[year_col].nunique() > 1:
@@ -3887,22 +3918,28 @@ with tabs[6]:
             y0, yN = fdf[year_col].min(), fdf[year_col].max()
             lv = fdf.pivot_table(index=unit, columns=year_col, values=score_col, aggfunc="mean").dropna()
             lv = lv[lv.index.isin(eligible)]   # same min-N guard as the rankings
-            quad = pd.DataFrame({
+            lvp = lv.rank(pct=True) * 100     # percentile per year: the
+            quad = pd.DataFrame({             # only fair cross-year change
                 "current": lv[yN].round(1),
-                "change": (lv[yN] - lv[y0]).round(1),
+                "change": (lvp[yN] - lvp[y0]).round(1),
                 "n": fdf.groupby(unit)[score_col].size(),
             }).reset_index()
             fig = px.scatter(quad, x="current", y="change", size="n", hover_name=unit,
                              color="change", color_continuous_scale="RdYlGn",
-                             labels={"current": f"Average score ({yN})",
-                                     "change": f"Change {y0}→{yN}"})
+                             labels={"current": f"Average score ({yN}) — "
+                                                "latest paper",
+                                     "change": f"Percentile change "
+                                               f"{y0}→{yN} (pts)"})
             fig.add_hline(y=0, line_dash="dot", line_color="gray")
-            fig.add_vline(x=float(fdf[score_col].mean()), line_dash="dot", line_color="gray")
+            fig.add_vline(x=float(lv[yN].mean()), line_dash="dot", line_color="gray")
             fig.update_layout(height=480)
             st.plotly_chart(fig, use_container_width=True)
 
-            st.caption("Bottom-left quadrant = below-average AND declining → the at-risk list. "
-                       "Dot size = number of records.")
+            st.caption("Across = average on the LATEST paper (within-year, "
+                       "exact). Up/down = percentile places gained/lost "
+                       "among peers since the first year (paper-proof). "
+                       "**Bottom-left = below average AND losing ground → "
+                       "the at-risk list.** Dot size = number of records.")
 
         # Sankey: movement between performance bands (first year -> last year)
         sid = sid_col if (sid_col and sid_col in fdf.columns) else None
@@ -4014,11 +4051,23 @@ with tabs[7]:
             _dmean = df[score_col].mean() * (100.0 / _oop if _oop else 1)
             _dstd = df[score_col].std() * (100.0 / _oop if _oop else 1)
             _default = float(np.clip(round(_dmean - 0.5 * _dstd, 1), _lo, _hi))
-            threshold = st.slider("At-risk threshold (projected score below…)",
-                                  _lo, _hi, _default,
-                                  help=f"'{score_col}' runs {_smin:g}–{_smax:g} in this "
-                                       f"dataset; the default is half a standard "
-                                       f"deviation below the mean.")
+            if RQMAPS:
+                st.caption("🏁 **Paper-proof forecasting:** a new paper is "
+                           "set every year, so projecting raw scores would "
+                           "project paper difficulty. This forecasts each "
+                           "unit's **percentile standing among same-year "
+                           "peers** instead — 50 = middle of the pack.")
+                threshold = st.slider(
+                    "At-risk threshold (projected percentile below…)",
+                    0.0, 100.0, 25.0,
+                    help="Units projected to stand below this percentile "
+                         "of their peers next year.")
+            else:
+                threshold = st.slider("At-risk threshold (projected score below…)",
+                                      _lo, _hi, _default,
+                                      help=f"'{score_col}' runs {_smin:g}–{_smax:g} in this "
+                                           f"dataset; the default is half a standard "
+                                           f"deviation below the mean.")
             years_sorted = sorted(fdf[year_col].unique())
             next_year = int(years_sorted[-1]) + 1
             pv = fdf.pivot_table(index=unit_p, columns=year_col, values=score_col,
@@ -4043,6 +4092,8 @@ with tabs[7]:
                                      values=score_col, aggfunc="mean").dropna()
                 if _oop:
                     pv = pv * 100.0 / _oop
+            if RQMAPS:
+                pv = pv.rank(pct=True) * 100    # percentile per year column
             xs = np.array(years_sorted, dtype=float)
 
             def project(row):
@@ -4059,7 +4110,9 @@ with tabs[7]:
 
             n_risk = int(proj["At Risk"].sum())
             c1, c2, c3 = st.columns(3)
-            c1.metric(f"Units projected below {threshold} in {next_year}", n_risk)
+            c1.metric(f"Units projected below "
+                      f"{threshold:g}{'th pctile' if RQMAPS else ''} "
+                      f"in {next_year}", n_risk)
             c2.metric("Steepest decline", f"{proj['Trend/yr'].min():+.1f}/yr")
             c3.metric("Fastest improvement", f"{proj['Trend/yr'].max():+.1f}/yr")
 
@@ -4121,10 +4174,18 @@ with tabs[7]:
 
             with st.expander("Method (for the jury)"):
                 st.markdown(
-                    "Per unit: ordinary least-squares line fit on the yearly averages "
-                    f"({', '.join(map(str, years_sorted))}) → extrapolated to {next_year}. "
-                    "Simple, transparent, explainable — upgradeable to feature-based ML "
-                    "(teacher quality, income, gender mix) as a next step.")
+                    ("Per unit: each year's average is converted to a "
+                     "**percentile among all units that sat the same "
+                     "year's paper** (the paper changes yearly, so raw "
+                     "scores are not comparable across years), then an "
+                     if RQMAPS else "Per unit: an ")
+                    + "ordinary least-squares line fit on the yearly "
+                    + ("standings " if RQMAPS else "averages ")
+                    + f"({', '.join(map(str, years_sorted))}) → "
+                      f"extrapolated to {next_year}. Simple, transparent, "
+                      "explainable — upgradeable to feature-based ML "
+                      "(teacher quality, income, gender mix) as a next "
+                      "step.")
         else:
             st.info("Prediction needs a hierarchy column and at least 2 years of data.")
     _tab6_fragment()
@@ -4470,6 +4531,12 @@ with tabs[10]:
             mc1.metric("Districts matched to map", f"{len(matched)} / {len(m)}")
             mc2.metric("Map regions with data",
                        f"{len(matched)} / {len(geo_names)}")
+            _no_data = sorted(geo_names - set(matched["geo_name"]))
+            if _no_data and not demo_assigned:
+                st.caption("⬜ Blank on the map — **not covered by the GP "
+                           "contest in this selection** (it runs in Gram "
+                           "Panchayat / rural areas, and coverage changed "
+                           "across years): " + ", ".join(_no_data) + ".")
             if unmatched and not demo_assigned:
                 st.warning("Not on the map (fix spellings in DISTRICT_FIX): "
                            + ", ".join(unmatched[:15])
@@ -4617,8 +4684,17 @@ with tabs[10]:
                     # too, and rolls up to named competencies when a map is
                     # loaded — previously this needed Q1..Qn COLUMNS, which
                     # the melted dataset does not have, so it never appeared.
-                    _mov = question_means(mdf, MQF, _mby)
-                    _mun = question_means(_dd, MQF, _mby)
+                    if RQMAPS:
+                        # papers differ per year+grade — compare this
+                        # district by COMPETENCY, each child on own paper
+                        _qmm = [q for q in MQF["questions"]
+                                if q in mdf.columns]
+                        _mov = comp_score_frame(mdf, _qmm, RQMAPS).mean()
+                        _mun = comp_score_frame(_dd, _qmm, RQMAPS).mean()
+                        _mby = "Competency"
+                    else:
+                        _mov = question_means(mdf, MQF, _mby)
+                        _mun = question_means(_dd, MQF, _mby)
                     _mdlt = (_mun - _mov).dropna().sort_values()
                     if len(_mdlt):
                         _mlabels = ([question_label(i) for i in _mdlt.index]
