@@ -9,7 +9,14 @@ import pandas as pd
 
 # Below this many students a percentage is not worth stating as a fact:
 # with n=1 every value is 0% or 100%, and a "100-point swing" is one child.
-MIN_N_FOR_TREND = 10
+# Kept in step with insights.MIN_N so Facts & Health and the Insights tab can
+# never disagree about what is reportable: at 10, a 12-child block could state
+# "worsened from 40% to 90%" here while Insights suppressed the same block.
+try:
+    from insights import MIN_N as _INSIGHTS_MIN_N
+except Exception:                              # standalone use
+    _INSIGHTS_MIN_N = 30
+MIN_N_FOR_TREND = _INSIGHTS_MIN_N
 
 
 def _sentence(r):
@@ -57,10 +64,22 @@ def competency_table(agg, district, year=None):
     if year is None:
         year = d["year"].max()
     d = d[d["year"] == year]
+    # Size-weighted. An unweighted mean put a 10-child block on equal footing
+    # with a 4,000-child one and reported 70% where the true child-weighted
+    # rate was 40% — while `students` in the same row WAS summed, so the table
+    # mixed an unweighted rate with a weighted headcount.
+    def _w(g, col):
+        w = pd.to_numeric(g["n"], errors="coerce").fillna(0.0)
+        v = pd.to_numeric(g[col], errors="coerce")
+        ok = v.notna() & (w > 0)
+        return (float((v[ok] * w[ok]).sum() / w[ok].sum())
+                if ok.any() else float("nan"))
+
     t = (d.groupby("competency")
-           .agg(below_pct=("below_pct", "mean"),
-                gender_gap=("gender_gap", "mean"),
-                students=("n", "sum"))
+           .apply(lambda g: pd.Series({"below_pct": _w(g, "below_pct"),
+                                       "gender_gap": _w(g, "gender_gap"),
+                                       "students": g["n"].sum()}),
+                  include_groups=False)
            .reset_index()
            .sort_values("below_pct", ascending=False))
     t["below_pct"] = t["below_pct"].round(0)

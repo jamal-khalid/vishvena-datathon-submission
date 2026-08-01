@@ -1270,8 +1270,9 @@ def _c_competency_corr(_agg, agg_sig, district):
     return L_competency.correlation_matrix(_agg, district)
 
 @st.cache_data(show_spinner=False)
-def _c_what_if(_agg, agg_sig, district, comp, n_blocks):
-    return L_models.what_if(_agg, district, comp, n_blocks=n_blocks)
+def _c_what_if(_agg, agg_sig, district, comp, n_blocks, min_n=30):
+    return L_models.what_if(_agg, district, comp, n_blocks=n_blocks,
+                            min_n=min_n)
 
 @st.cache_data(show_spinner=False)
 def _c_benchmarks(_agg, agg_sig):
@@ -3331,17 +3332,55 @@ with tabs[6]:
                 bt_pred = pv.apply(bt_project, axis=1).clip(0, 100)
                 bt_real = pv[hold]
                 err = (bt_pred - bt_real).abs()
+                # An error figure alone means nothing without something to
+                # compare it with. The bar any forecast must clear is "assume
+                # nothing changes" — carry last year forward. The Archetypes
+                # tab applies this same test, and its model fails it; showing
+                # it here too keeps the two consistent and is the difference
+                # between "±0.3 points" and "67% better than doing nothing".
+                _naive_pred = pv[years_sorted[-2]]
+                _naive_err = (_naive_pred - bt_real).abs()
+                _n_mae, _t_mae = float(_naive_err.mean()), float(err.mean())
+                _beats = _t_mae < _n_mae
+                _gain = (100 * (_n_mae - _t_mae) / _n_mae) if _n_mae else 0.0
                 real_risk = set(bt_real[bt_real < threshold].index)
                 pred_risk = set(bt_pred[bt_pred < threshold].index)
                 caught = len(real_risk & pred_risk)
+                _naive_caught = len(real_risk &
+                                    set(_naive_pred[_naive_pred < threshold].index))
 
-                b1, b2, b3 = st.columns(3)
+                b1, b2, b3, b4 = st.columns(4)
                 b1.metric("Avg error (points)", f"±{err.mean():.1f}")
-                b2.metric("Worst error", f"±{err.max():.1f}")
-                b3.metric("At-risk caught", f"{caught} of {len(real_risk)}" if real_risk else "n/a")
+                b2.metric("Naive baseline", f"±{_n_mae:.1f}",
+                          help="'Assume nothing changes' — carry the previous "
+                               "year forward. Any forecast must beat this to "
+                               "be worth using.")
+                b3.metric("Better than naive", f"{_gain:+.0f}%",
+                          delta="beats baseline" if _beats else "FAILS baseline",
+                          delta_color="normal" if _beats else "inverse")
+                b4.metric("At-risk caught",
+                          f"{caught} of {len(real_risk)}" if real_risk else "n/a",
+                          help=f"the naive rule caught {_naive_caught}"
+                               if real_risk else None)
                 st.caption(f"Method: trained only on {', '.join(map(str, years_sorted[:-1]))}, "
                            f"predicted {hold} blind, compared against the real {hold} values. "
                            "The model never saw the year it predicted.")
+                if not _beats:
+                    st.error(
+                        f"🚫 **The trend line does not beat assuming nothing "
+                        f"changes** (±{_t_mae:.1f} against ±{_n_mae:.1f}). Do not "
+                        f"present the projections above as forecasts — at this "
+                        f"granularity year-to-year movement is mostly noise, and "
+                        f"carrying the last observed value forward is both simpler "
+                        f"and more accurate.")
+                else:
+                    st.success(
+                        f"✅ On a held-out year the trend projection is "
+                        f"**{_gain:.0f}% more accurate than assuming no change** "
+                        f"(±{_t_mae:.1f} against ±{_n_mae:.1f} points), and catches "
+                        f"{caught} of {len(real_risk)} units that really did fall "
+                        f"below the threshold against the naive rule's "
+                        f"{_naive_caught}.")
                 if len(train_years) < 3:
                     st.warning(
                         f"⚠️ **Interpret this backtest with care.** It trains on only "
@@ -4235,7 +4274,7 @@ with tabs[16]:
 
             bench = _c_benchmarks(AGG, AGG_SIG)
             rebound = _c_rebound(AGG, AGG_SIG)
-            w = _c_what_if(AGG, AGG_SIG, d_wi, comp_wi, n_blocks)
+            w = _c_what_if(AGG, AGG_SIG, d_wi, comp_wi, n_blocks, min_n=MINN)
 
             if w is None or not w["scenarios"]:
                 st.info("Not enough history in this selection to model a scenario. "

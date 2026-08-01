@@ -24,17 +24,49 @@ def trajectory(below_pct, prev_pct):
 
 
 # ---------- Layer 2: cluster blocks into learning archetypes ----------
-def block_feature_matrix(agg, year=None):
+MIN_N_FOR_CLUSTER = 30
+
+
+def _wpivot(d, index, columns, value="below_pct", weight="n"):
+    """Size-weighted pivot. An unweighted mean lets one small grade dominate."""
+    num = (d.assign(_p=pd.to_numeric(d[value], errors="coerce")
+                    * pd.to_numeric(d[weight], errors="coerce"))
+             .pivot_table(index=index, columns=columns, values="_p",
+                          aggfunc="sum"))
+    den = d.pivot_table(index=index, columns=columns, values=weight,
+                        aggfunc="sum")
+    return num / den.replace(0, np.nan)
+
+
+def block_feature_matrix(agg, year=None, min_n=MIN_N_FOR_CLUSTER):
+    """
+    Block x competency matrix of size-weighted below%.
+
+    TWO THINGS WERE WRONG HERE:
+
+    `.fillna(0)` turned a competency a block was never measured on into 0%
+    below grade level — a PERFECT score. KMeans then clustered that block as
+    outstanding at a subject it has no data for. Missing is not zero, so
+    blocks with an incomplete profile are dropped instead.
+
+    `aggfunc="mean"` averaged grades unweighted, so a 20-child grade counted
+    as much as a 1,500-child one.
+    """
     if year is None:
         year = agg["year"].max()
     d = agg[agg["year"] == year]
-    piv = d.pivot_table(index=["district", "block"], columns="competency",
-                        values="below_pct", aggfunc="mean").fillna(0)
-    return piv
+    size = d.groupby(["district", "block"])["n"].sum()
+    keep = set(size[size >= min_n].index)
+    if keep:
+        d = d[[t in keep for t in zip(d["district"], d["block"])]]
+    piv = _wpivot(d, ["district", "block"], "competency")
+    return piv.dropna(axis=0, how="any")        # complete profiles only
 
 
-def cluster_blocks(agg, k=3, year=None):
-    piv = block_feature_matrix(agg, year)
+def cluster_blocks(agg, k=3, year=None, min_n=MIN_N_FOR_CLUSTER):
+    piv = block_feature_matrix(agg, year, min_n=min_n)
+    if piv.empty or len(piv) < 2:
+        return piv.reset_index(), {}
     k = min(k, len(piv))
     km = KMeans(n_clusters=k, n_init=10, random_state=0)
     labels = km.fit_predict(piv.values)
@@ -53,7 +85,19 @@ def cluster_blocks(agg, k=3, year=None):
 
 # ---------- Layer 6a: risk model (predict staying below grade) ----------
 def train_risk(agg):
-    """Tiny logistic model: features [below_pct, yoy_change] -> risk of >=50% below."""
+    """
+    DEPRECATED — CIRCULAR. Do not use; kept only so older notebooks import.
+
+    It predicts `below_pct >= 50` while using `below_pct` as a feature, so it
+    re-describes the present and scores near-perfectly for no reason. The
+    dashboard does not call it. train_early_warning() is the honest
+    replacement: it predicts NEXT year and is validated on a transition it
+    never saw.
+    """
+    import warnings
+    warnings.warn("train_risk() is circular (below_pct predicts "
+                  "below_pct >= 50); use train_early_warning() instead",
+                  DeprecationWarning, stacklevel=2)
     d = agg.dropna(subset=["prev_pct"]).copy()
     d["yoy"] = d["below_pct"] - d["prev_pct"]
     X = d[["below_pct", "yoy"]].values
@@ -243,12 +287,25 @@ def improvement_benchmarks(agg, min_n=MIN_N_FOR_BENCHMARK):
     gains = d[d["gain"] > 0]["gain"]
     if gains.empty:
         return {"typical": 0.0, "strong": 0.0, "best": 0.0,
-                "n_observed": 0, "min_n_used": used_cut, "reliable": False}
+                "n_observed": 0, "n_groups": int(len(d)),
+                "share_improving": 0.0, "net_change_pts": 0.0,
+                "conditioned_on": "groups that improved",
+                "min_n_used": used_cut, "reliable": False}
+    # These quantiles are conditioned on IMPROVING groups. Reporting the median
+    # of that subset as "typical" without saying so is misleading: where half
+    # the blocks improved 2 points and half worsened 10, it returns "typical
+    # improvement 2.0" while the population actually moved -4.0. Callers get
+    # the share and the net change so they can tell the two apart.
     return {
         "typical":    float(gains.quantile(0.50)),
         "strong":     float(gains.quantile(0.75)),
         "best":       float(gains.quantile(0.90)),
         "n_observed": int(len(gains)),
+        "n_groups":   int(len(d)),
+        "share_improving": round(float(len(gains) / max(len(d), 1)), 3),
+        "net_change_pts": round(float(
+            (d["gain"] * d["n"]).sum() / max(d["n"].sum(), 1)), 2),
+        "conditioned_on": "groups that improved",
         "min_n_used": used_cut,
         "reliable":   bool(used_cut >= min_n and len(gains) >= 20),
     }
@@ -270,12 +327,15 @@ def natural_rebound(agg, worst_quintile=0.20, min_n=MIN_N_FOR_BENCHMARK):
         return 0.0
     thresh = d["prev_pct"].quantile(1 - worst_quintile)
     worst = d[d["prev_pct"] >= thresh]
-    if worst.empty:
+    if worst.empty or worst["n"].sum() <= 0:
         return 0.0
-    return float((worst["prev_pct"] - worst["below_pct"]).mean())
+    # child-weighted, like every other rate in the system
+    return float(((worst["prev_pct"] - worst["below_pct"]) * worst["n"]).sum()
+                 / worst["n"].sum())
 
 
-def what_if(agg, district, competency, n_blocks=10, year=None):
+def what_if(agg, district, competency, n_blocks=10, year=None,
+            min_n=MIN_N_FOR_BENCHMARK):
     """
     Scenario planner, NOT a prediction.
 
@@ -295,14 +355,32 @@ def what_if(agg, district, competency, n_blocks=10, year=None):
     if d.empty:
         return None
 
-    # roll grades up so each row is one real block
+    # Roll grades up so each row is one real block — WEIGHTED. An unweighted
+    # mean of grade rates let a 6-child grade set the block's figure.
     blocks = (d.groupby("block")
-                .agg(below_pct=("below_pct", "mean"), n=("n", "sum"))
-                .reset_index())
-    target = blocks.nlargest(min(n_blocks, len(blocks)), "below_pct")
+                .apply(lambda g: pd.Series({
+                    "below_pct": float((g["below_pct"] * g["n"]).sum()
+                                       / g["n"].sum()) if g["n"].sum() else np.nan,
+                    "n": g["n"].sum()}), include_groups=False)
+                .reset_index().dropna(subset=["below_pct"]))
 
-    before = float(target["below_pct"].mean())
+    # Never plan an intervention into a group too small to measure. Targeting
+    # the highest below% with no floor picked the smallest block every time —
+    # a 4-child block at 100% outranked six blocks of 1,200 children.
+    eligible = blocks[blocks["n"] >= min_n]
+    skipped = int(len(blocks) - len(eligible))
+    if eligible.empty:
+        return {"competency": competency, "district": district,
+                "blocks_targeted": 0, "block_names": [], "students_covered": 0,
+                "before_below_pct": None, "scenarios": [],
+                "blocks_below_min_n": skipped,
+                "reason": f"No block in {district} has {min_n}+ students "
+                          f"assessed on {competency}."}
+    target = eligible.nlargest(min(n_blocks, len(eligible)), "below_pct")
+
     students = int(target["n"].sum())
+    # the rate across the CHILDREN being targeted, not the mean of block means
+    before = float((target["below_pct"] * target["n"]).sum() / students)
     bench = improvement_benchmarks(agg)
     rebound = natural_rebound(agg)
 
