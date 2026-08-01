@@ -41,7 +41,20 @@ import gka as L_gka                      # <-- ADDED: GKA programme impact
 from stats_tests import proportion_test
 import verbalize as L_verbalize
 
-st.set_page_config(page_title="Vishvena AI — Data Studio", layout="wide")
+st.set_page_config(page_title="DataTalk — Vishvena AI", layout="wide",
+                   page_icon=(os.path.join(_HERE, "images", "logo.png")
+                              if os.path.exists(os.path.join(_HERE, "images", "logo.png"))
+                              else "📊"))
+# mini logo pinned in the top navbar (top-left, stays while scrolling)
+try:
+    _navlogo = os.path.join(_HERE, "images", "logo.png")
+    if os.path.exists(_navlogo):
+        try:
+            st.logo(_navlogo, size="large")
+        except TypeError:          # older Streamlit without size=
+            st.logo(_navlogo)
+except Exception:
+    pass
 
 # ---------------- LIGHT THEME SKIN (matches pages/Missions design) ---------
 st.markdown("""
@@ -133,6 +146,8 @@ div[data-testid="stMetricDelta"] * { font-size: 13px !important; }
     border: 1.5px dashed #c6cdd8 !important; border-radius: 12px; }
 [data-testid="stAlert"] { border-radius: 12px; }
 [data-testid="stHeader"] { background: #f2f4f8; }
+[data-testid="stLogo"] { height: 56px !important; width: auto !important;
+    border-radius: 12px !important; box-shadow: 0 2px 6px rgba(0,0,0,.25); }
 /* Data tab hidden per request — code intact; delete this rule to restore.
    nth-of-type(9) = 9th tab BUTTON: 🗂️ Data (nth-of-type ignores the
    non-button highlight element inside the tab bar) */
@@ -732,9 +747,14 @@ if _SHOW_MISSIONS_LINK:
     try:
         st.sidebar.page_link("pages/Missions.py",
                              label="**🎯 National Missions →**")
-        st.sidebar.markdown("---")
     except Exception:
         pass
+try:
+    st.sidebar.page_link("pages/NIPUN.py", label="**🧮 NIPUN Bharat →**")
+    st.sidebar.page_link("pages/PARAKH.py", label="**🧭 PARAKH →**")
+    st.sidebar.markdown("---")
+except Exception:
+    pass
 st.sidebar.title("📂 Data")
 # ---- optional question map: maps Q items to named competencies -----------
 @st.cache_data(show_spinner=False)
@@ -905,7 +925,22 @@ if (not uploaded and not _picked_local and os.path.exists(_CACHE_FILE)
         st.rerun()
 
 if not uploaded and not _picked_local:
-    st.title("📊 Education Insights Dashboard")
+    _lp0 = os.path.join(_HERE, "images", "logo.png")
+    if os.path.exists(_lp0):
+        import base64 as _b640
+        with open(_lp0, "rb") as _lf0:
+            _i0 = _b640.b64encode(_lf0.read()).decode()
+        st.markdown("<div style='display:flex; align-items:center; gap:16px;"
+                    " margin:2px 0 6px;'><img src='data:image/png;base64,"
+                    + _i0 + "' style='height:64px;width:64px;"
+                    "border-radius:14px;'/><div><div style='font-size:40px;"
+                    "font-weight:800;color:#101828;letter-spacing:-1px;"
+                    "line-height:1.05;'>DataTalk</div><div style='font-size:"
+                    "14px;color:#67707f;font-weight:600;'>by Vishvena AI · "
+                    "Education Insights Dashboard</div></div></div>",
+                    unsafe_allow_html=True)
+    else:
+        st.title("DataTalk")
     st.info("⬅️ Upload your dataset to begin, or pick files already on disk. "
             "Expected: marks/scores + hierarchy columns "
             "(Division/District/Block/Cluster) + any text columns.")
@@ -1441,7 +1476,29 @@ if year_col:
     fdf = fdf[(fdf[year_col] >= year_range[0]) & (fdf[year_col] <= year_range[1])]
 
 # ------------------------------- Header + KPIs -------------------------------
-st.title("📊 Education Insights Dashboard")
+def _brand_header(sub=""):
+    """DataTalk product header with the Vishvena logo (base64-inlined so it
+    renders identically everywhere; falls back to text if logo.png absent)."""
+    _lp = os.path.join(_HERE, "images", "logo.png")
+    _img = ""
+    if os.path.exists(_lp):
+        import base64 as _b64
+        with open(_lp, "rb") as _lf:
+            _img = ("<img src='data:image/png;base64,"
+                    + _b64.b64encode(_lf.read()).decode()
+                    + "' style='height:64px; width:64px; border-radius:14px;"
+                    "box-shadow:0 2px 8px rgba(16,24,40,.12);'/>")
+    st.markdown(
+        "<div style='display:flex; align-items:center; gap:16px; "
+        "margin:2px 0 6px;'>" + _img +
+        "<div><div style='font-size:40px; font-weight:800; color:#101828; "
+        "letter-spacing:-1px; line-height:1.05;'>DataTalk</div>"
+        "<div style='font-size:14px; color:#67707f; font-weight:600;'>"
+        "by Vishvena AI" + (" · " + sub if sub else "") + "</div></div></div>",
+        unsafe_allow_html=True)
+
+
+_brand_header("Education Insights Dashboard")
 # After the Q1..Qn melt one row is ONE ANSWER, not one student — label it
 # honestly so "1,000 students" never silently reads as "20,000 records".
 _row_unit = "question responses" if fmt_info.get("reshaped") else "records"
@@ -2962,32 +3019,15 @@ with tabs[3]:
                                                        comp].mean(),
                                     "Male": _csf.loc[_gg["_g"] == "Male",
                                                      comp].mean()})
-                            # comp_score_frame drops competencies that are all
-                            # NaN for this slice, so it can legitimately come
-                            # back with no columns — a gender filter leaving
-                            # one paper, or a slice whose year/grade matches no
-                            # paper at all. set_index on an empty list then
-                            # raises and takes every tab after this one with
-                            # it, which is how a narrow filter looked like a
-                            # broken app.
-                            _by = (pd.DataFrame(_rows).set_index("Competency")
-                                   if _rows else None)
+                            _by = pd.DataFrame(_rows).set_index("Competency")
                             _dim = "Competency"
-                            if _by is None:
-                                st.info(
-                                    "No competency could be scored for this "
-                                    "selection — the questions in view do not "
-                                    "map to a competency in the paper(s) this "
-                                    "slice covers. Switch the breakdown to "
-                                    "Item, or widen the filters.")
                         else:
                             for q in _qg:
                                 _rows.append({
                                     "Item": q,
                                     "Female": _gg.loc[_gg["_g"] == "Female", q].mean() * 100,
                                     "Male": _gg.loc[_gg["_g"] == "Male", q].mean() * 100})
-                            _by = (pd.DataFrame(_rows).set_index("Item")
-                                   if _rows else None)
+                            _by = pd.DataFrame(_rows).set_index("Item")
                             _dim = "Item"
                     else:
                         _by = None
