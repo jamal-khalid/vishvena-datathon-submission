@@ -192,9 +192,23 @@ def build_agg(df, *, hierarchy, score_col=None, year_col=None, gender_col=None,
             con.close()
         if qmap:
             # question map provided: fold the per-item rows into named
-            # competencies (Numeracy, Algebra, ...) by summing counts
-            _qm = {str(k): str(v) for k, v in dict(qmap).items()}
-            g["competency"] = g["competency"].map(lambda q: _qm.get(str(q), str(q)))
+            # competencies by summing counts. Two key shapes are accepted:
+            #   {"Q1": "addition"}                       — one paper for all
+            #   {(2023, 5, "Q1"): "addition"}            — per year & grade
+            #     (the real GP contest changes the paper every year/grade)
+            _qm = dict(qmap)
+            _multi = any(isinstance(k, tuple) for k in _qm)
+            if _multi:
+                _qm = {(int(k[0]), int(k[1]), str(k[2])): str(v)
+                       for k, v in _qm.items()}
+                g["competency"] = [
+                    _qm.get((int(y), int(gr), str(q)), str(q))
+                    for y, gr, q in zip(g["year"], g["grade"],
+                                        g["competency"])]
+            else:
+                _qm = {str(k): str(v) for k, v in _qm.items()}
+                g["competency"] = g["competency"].map(
+                    lambda q: _qm.get(str(q), str(q)))
             g = (g.groupby(["division", "district", "block", "grade",
                             "competency", "year"], as_index=False)
                  [["n", "below", "above", "f_n", "f_below_n", "m_below_n"]]
@@ -306,4 +320,4 @@ def warnings(agg, min_n=30):
         w.append("⚠️ Only one year present in the current selection.")
     if not agg["gender_gap"].notna().any():
         w.append("⚠️ No gender column resolved — equity findings are disabled.")
-    return 
+    return

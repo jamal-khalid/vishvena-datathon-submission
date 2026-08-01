@@ -36,7 +36,6 @@ import competency as L_competency
 import models_ml as L_models
 import charts as L_charts
 import secondary as L_secondary          # <-- ADDED: cross-dataset layer
-import insights_cross as L_cross         # <-- ADDED: cross-dataset insights
 from stats_tests import proportion_test
 import verbalize as L_verbalize
 
@@ -145,7 +144,8 @@ div[data-testid="stMetricDelta"] * { font-size: 13px !important; }
 
 
 # ----------------------------- Data handling --------------------------------
-HIERARCHY_CANDIDATES = ["Division", "District", "Block", "Cluster"]
+HIERARCHY_CANDIDATES = ["Division", "District", "Block", "Cluster",
+                        "GP Name", "GP"]
 
 DATA_EXT = (".xlsx", ".xls", ".csv", ".parquet")
 UPLOAD_EXT = [e.lstrip(".") for e in DATA_EXT] + ["zip"]
@@ -168,7 +168,13 @@ def _read_excel_fast(name, src):
         try:
             if hasattr(src, "seek"):
                 src.seek(0)                  # a failed attempt consumes a buffer
-            df = pd.read_excel(src, engine=eng) if eng else pd.read_excel(src)
+            _kw = {"engine": eng} if eng else {}
+            try:
+                df = pd.read_excel(src, sheet_name="Assessment Data", **_kw)
+            except Exception:
+                if hasattr(src, "seek"):
+                    src.seek(0)
+                df = pd.read_excel(src, **_kw)
             ENGINE_USED[name] = eng or "openpyxl"
             return df
         except Exception as e:               # missing wheel, or an odd workbook
@@ -207,7 +213,190 @@ def _expand(name, src):
                     or "__MACOSX" in member
                     or not base.lower().endswith(DATA_EXT)):
                 continue
-            yield f"{os.path.basename(name)}:{base}", io.BytesIO(z.read(info))
+            yield f"{os.path.basename(name)}:{member}", io.BytesIO(z.read(info))
+
+
+_YEAR_RE = re.compile(r"(20\d\d)\s*[-_]\s*(\d\d)")
+_GRADE_RE = re.compile(r"[Gg]rade[\s_-]*(\d)")
+
+
+def _stamp_year_grade(part, member):
+    """Real GP-contest files carry Year in the folder/filename and Grade in
+    the filename (e.g. 2023-24/GPContest_Grade_5_2023-24.xlsx). Stamp both
+    as columns if the file doesn't already have them; fall back to the
+    Unique Identifier column (Grade_5_23_24_...)."""
+    cols = {str(c).strip().lower() for c in part.columns}
+    need_year = "year" not in cols
+    need_grade = "grade" not in cols
+    if not (need_year or need_grade):
+        return part
+    ym = _YEAR_RE.search(member)
+    gm = _GRADE_RE.search(os.path.basename(member)) or _GRADE_RE.search(member)
+    year = f"{ym.group(1)}-{ym.group(2)}" if ym else None
+    grade = int(gm.group(1)) if gm else None
+    if (year is None or grade is None) and "Unique Identifier" in part.columns:
+        u = str(part["Unique Identifier"].iloc[0])
+        um = re.search(r"Grade[\s_-]*(\d)[\s_-]*(\d\d)[\s_-]*(\d\d)", u)
+        if um:
+            grade = grade if grade is not None else int(um.group(1))
+            year = year or f"20{um.group(2)}-{um.group(3)}"
+    if need_year and year:
+        part["Year"] = year
+    if need_grade and grade is not None:
+        part["Grade"] = grade
+    return part
+
+
+# Karnataka canon: raw GP-contest spellings -> canonical district names, and
+# district -> administrative division (the data has no Division column).
+KA_DISTRICT_CANON = {
+    "bagalkot": "Bagalkote", "ballari": "Ballari", "belagavi": "Belagavi",
+    "belagavi chikkodi": "Belagavi", "bengaluru rural": "Bengaluru Rural",
+    "bengaluru urban": "Bengaluru Urban", "bidar": "Bidar",
+    "chamarajanagara": "Chamarajanagara", "chamarajanagar": "Chamarajanagara",
+    "chikkaballapura": "Chikkaballapura", "chikkaballapur": "Chikkaballapura",
+    "chikkamagaluru": "Chikkamagaluru", "chitradurga": "Chitradurga",
+    "dakshina kannada": "Dakshina Kannada", "davanagere": "Davanagere",
+    "dharwad": "Dharwad", "gadag": "Gadag", "hassan": "Hassan",
+    "haveri": "Haveri", "kalaburgi": "Kalaburagi", "kalaburagi": "Kalaburagi",
+    "kodagu": "Kodagu", "kolar": "Kolar", "koppal": "Koppal",
+    "mandya": "Mandya", "mysuru": "Mysuru", "raichur": "Raichur",
+    "ramanagara": "Ramanagara", "shivamogga": "Shivamogga",
+    "tumakuru": "Tumakuru", "tumakuru madhugiri": "Tumakuru",
+    "udupi": "Udupi", "uttara kannada": "Uttara Kannada",
+    "uttara kannada sirsi": "Uttara Kannada", "vijayanagar": "Vijayanagara",
+    "vijayanagara": "Vijayanagara", "vijayapura": "Vijayapura",
+    "yadagiri": "Yadgir", "yadgir": "Yadgir",
+}
+KA_DIVISION = {
+    "Belagavi": "Belagavi Division", "Bagalkote": "Belagavi Division",
+    "Vijayapura": "Belagavi Division", "Dharwad": "Belagavi Division",
+    "Gadag": "Belagavi Division", "Haveri": "Belagavi Division",
+    "Uttara Kannada": "Belagavi Division",
+    "Bengaluru Urban": "Bengaluru Division",
+    "Bengaluru Rural": "Bengaluru Division",
+    "Ramanagara": "Bengaluru Division", "Kolar": "Bengaluru Division",
+    "Chikkaballapura": "Bengaluru Division", "Tumakuru": "Bengaluru Division",
+    "Chitradurga": "Bengaluru Division", "Davanagere": "Bengaluru Division",
+    "Shivamogga": "Bengaluru Division",
+    "Kalaburagi": "Kalaburagi Division", "Bidar": "Kalaburagi Division",
+    "Raichur": "Kalaburagi Division", "Yadgir": "Kalaburagi Division",
+    "Koppal": "Kalaburagi Division", "Ballari": "Kalaburagi Division",
+    "Vijayanagara": "Kalaburagi Division",
+    "Mysuru": "Mysuru Division", "Mandya": "Mysuru Division",
+    "Hassan": "Mysuru Division", "Chikkamagaluru": "Mysuru Division",
+    "Kodagu": "Mysuru Division", "Chamarajanagara": "Mysuru Division",
+    "Dakshina Kannada": "Mysuru Division", "Udupi": "Mysuru Division",
+}
+
+
+def competency_coverage_note(rqmaps):
+    """One honest line about competencies NOT tested in every paper,
+    generated from the embedded maps themselves."""
+    if not rqmaps:
+        return None
+    papers = sorted(rqmaps.keys())
+    universe = sorted({c for m in rqmaps.values() for c in m.values()})
+    bits = []
+    for comp in universe:
+        have = {k for k, m in rqmaps.items() if comp in set(m.values())}
+        if len(have) == len(papers):
+            continue
+        yrs_all = sorted({y for y, g in papers})
+        yrs_missing = [y for y in yrs_all
+                       if not any((y, g) in have for g in (4, 5, 6))]
+        if yrs_missing:
+            bits.append(f"**{comp}** — not tested in "
+                        f"{', '.join(yrs_missing)}")
+        else:
+            bits.append(f"**{comp}** — in {len(have)} of "
+                        f"{len(papers)} papers")
+    if not bits:
+        return None
+    return ("📋 **Coverage:** the paper changes yearly, so some "
+            "competencies have gaps — " + " · ".join(bits)
+            + ". Averages use only the papers where a competency was "
+              "actually tested; blank cells mean it never appeared there.")
+
+
+def comp_score_frame(frame, item_cols, rqmaps, flat_qmap=None,
+                     year_col="Year", grade_col="Grade"):
+    """Per-student competency %-correct columns. With per-paper maps
+    (rqmaps={(year,grade):{Q:comp}}) each (year,grade) chunk uses ITS OWN
+    paper; with a flat map every row uses the same one. Returns a frame of
+    competency columns aligned to `frame`."""
+    comps = sorted({c for m in (rqmaps or {}).values() for c in m.values()}
+                   | set((flat_qmap or {}).values()))
+    out = pd.DataFrame(index=frame.index, columns=comps, dtype=float)
+    if rqmaps and year_col in frame.columns and grade_col in frame.columns:
+        _yg = frame.groupby([frame[year_col].astype(str),
+                             pd.to_numeric(frame[grade_col],
+                                           errors="coerce")]).groups
+        for (y, g), idx in _yg.items():
+            m = rqmaps.get((str(y), int(g)) if not pd.isna(g) else None)
+            if not m:
+                continue
+            for comp in comps:
+                cc = [q for q, c in m.items()
+                      if c == comp and q in item_cols]
+                if cc:
+                    out.loc[idx, comp] = frame.loc[idx, cc].mean(axis=1) * 100
+    elif flat_qmap:
+        for comp in comps:
+            cc = [q for q, c in flat_qmap.items()
+                  if c == comp and q in item_cols]
+            if cc:
+                out[comp] = frame[cc].mean(axis=1) * 100
+    return out.dropna(axis=1, how="all")
+
+
+@st.cache_data(show_spinner=False)
+def extract_embedded_qmaps(_sources, sig):
+    """Real GP-contest workbooks carry a 'Competency Mapping' sheet — and the
+    paper CHANGES every year and grade. Returns {(year, grade): {Q: comp}}
+    plus {(year, grade): {Q: question_name}}. Empty dicts when absent."""
+    qmaps, qnames = {}, {}
+    for name, src2 in _sources:
+        for member, handle in _expand(name, src2):
+            if not member.lower().endswith((".xlsx", ".xls")):
+                continue
+            ym = _YEAR_RE.search(member)
+            gm = _GRADE_RE.search(member)
+            if not (ym and gm):
+                continue
+            key = (f"{ym.group(1)}-{ym.group(2)}", int(gm.group(1)))
+            try:
+                if hasattr(handle, "seek"):
+                    handle.seek(0)
+                cm = pd.read_excel(handle, sheet_name="Competency Mapping",
+                                   header=None)
+            except Exception:
+                continue
+            cm = cm.dropna(how="all").dropna(axis=1, how="all")
+            _hdr = cm[cm.apply(lambda r: r.astype(str)
+                               .str.contains("Competency", case=False)
+                               .any(), axis=1)]
+            if _hdr.empty:
+                continue
+            h = _hdr.index[0]
+            cm.columns = cm.loc[h].astype(str).str.strip()
+            cm = cm.loc[h + 1:]
+            qc = next((c for c in cm.columns
+                       if str(c).lower().startswith("question")
+                       and "name" not in str(c).lower()), None)
+            cc = next((c for c in cm.columns
+                       if "compet" in str(c).lower()), None)
+            nc = next((c for c in cm.columns
+                       if "name" in str(c).lower()), None)
+            if not (qc and cc):
+                continue
+            q = cm[qc].astype(str).str.strip()
+            comp = (cm[cc].astype(str).str.strip().str.lower()
+                    .replace({"mensuration": "measurement"}))
+            qmaps[key] = dict(zip(q, comp))
+            if nc:
+                qnames[key] = dict(zip(q, cm[nc].astype(str).str.strip()))
+    return qmaps, qnames
 
 
 @st.cache_data(show_spinner=False)
@@ -241,6 +430,7 @@ def load_many(_sources, sig):
                 manifest.append({"file": member, "rows": 0,               # kill the rest
                                  "columns": 0, "status": f"❌ {type(e).__name__}: {e}"})
                 continue
+            part = _stamp_year_grade(part, member)
             frames.append(part)
             manifest.append({"file": member, "rows": len(part),
                              "columns": part.shape[1],
@@ -520,11 +710,18 @@ def _load_qmap(_file_bytes):
     return mapping, diff, order, None
 
 QMAP, QDIFF, COMP_ORDER = None, None, None
-_qm_up = st.sidebar.file_uploader(
-    "🗺️ Question map (optional CSV)", type=["csv"],
-    help="CSV with columns question, competency (difficulty optional). "
-         "Groups Q1..Qn into named skills like Numeracy or Algebra across "
-         "the dashboard. Leave empty to analyse per question.")
+# Real GP-contest workbooks embed their own per-paper competency maps and
+# override any CSV — so the uploader is tucked away; it only matters for
+# datasets WITHOUT an embedded "Competency Mapping" sheet.
+with st.sidebar.expander("⚙️ Advanced: question map CSV", expanded=False):
+    st.caption("Only needed for datasets without an embedded Competency "
+               "Mapping sheet — the real GP-contest workbooks carry their "
+               "own maps and ignore this.")
+    _qm_up = st.file_uploader(
+        "Question map (CSV)", type=["csv"],
+        help="CSV with columns question, competency. Groups Q1..Qn into "
+             "named skills. Ignored when the workbooks embed their own "
+             "maps.")
 _qm_bytes = None
 if _qm_up is not None:
     _qm_bytes = _qm_up.getvalue()
@@ -698,6 +895,30 @@ if df is None or df.empty:
     if _manifest:
         st.dataframe(pd.DataFrame(_manifest), use_container_width=True)
     st.stop()
+
+# ---- real-data normalization (GP-contest format) --------------------------
+# The 2022-25 GP-contest files have: lowercase district spellings (incl.
+# educational districts like "belagavi chikkodi"), no Division, no Score.
+if "District" in df.columns:
+    _dl = df["District"].astype(str).str.strip().str.lower()
+    df["District"] = _dl.map(KA_DISTRICT_CANON).fillna(
+        df["District"].astype(str).str.strip().str.title())
+if "Division" not in df.columns and "District" in df.columns:
+    df["Division"] = df["District"].map(KA_DIVISION).fillna("Karnataka")
+_qitem_cols = [c for c in df.columns if re.fullmatch(r"Q\d+", str(c))]
+if "Score" not in df.columns and _qitem_cols:
+    df["Score"] = df[_qitem_cols].sum(axis=1)
+
+# ---- per-paper competency maps embedded in the workbooks ------------------
+RQMAPS, RQNAMES = extract_embedded_qmaps(_sources, _fsig)
+if RQMAPS:
+    _n_comps = len({c for m in RQMAPS.values() for c in m.values()})
+    st.sidebar.success(f"🗺️ Competency maps read from the workbooks: "
+                       f"{len(RQMAPS)} papers (per year & grade), "
+                       f"{_n_comps} competencies")
+    # the papers change every year+grade — override any flat CSV map
+    QMAP, QDIFF = None, None
+    COMP_ORDER = sorted({c for m in RQMAPS.values() for c in m.values()})
 
 # Persist browser uploads to a local Parquet cache (once per file set) so a
 # page refresh — which wipes Streamlit's upload widget — restores instantly.
@@ -882,6 +1103,9 @@ if year_col and year_col in df.columns:
                            f"(e.g. {_sample} → {df[year_col].iloc[0]}).")
 
 _score_opts = cols["objective"] or df.columns.tolist()
+_score_opts = [c for c in _score_opts
+               if not re.search(r"\b(id|identifier)\b", str(c), re.I)] \
+    or _score_opts
 _default_score = next((c for c in ("Score", "Overall (%)") if c in _score_opts),
                       _score_opts[0])
 score_col = st.sidebar.selectbox("Score column", _score_opts,
@@ -1063,7 +1287,7 @@ st.sidebar.title("🔍 Slice & Dice")
 # ---- share with the 🎯 Missions page (pages/Missions.py) ----------------
 st.session_state["_mx_primary_df"] = df
 st.session_state["_mx_score_col"] = score_col
-st.session_state["_mx_qmap"] = QMAP if QMAP else None
+st.session_state["_mx_qmap"] = RQMAPS if RQMAPS else (QMAP or None)
 
 fdf = df.copy()
 _active_filters = {}          # reused by the analysis layers on the raw item frame
@@ -1108,15 +1332,12 @@ if hierarchy:
         k4.metric(f"Weakest {hierarchy[-1]}", grp.idxmin(), f"{grp.min():.1f}",
                   delta_color="inverse")
 
-# Cross-dataset sits BEFORE Insights on purpose: the district-context join is
-# an input to the final insights, not an afterthought, and the reading order
-# should match the analysis order.
 tabs = st.tabs(["🌞 Hierarchy", "📈 Trends", "⚖️ Gender Gap", "🎯 Competencies",
                 "🔬 Deep Dive", "🚨 Rankings & Alerts", "🔮 Prediction",
                 "🗂️ Data", "🧩 Item Analysis", "🗺️ Map",
-                "📄 Facts & Health", "🔗 Cross-dataset", "🧠 Insights",
-                "📋 Action Plan", "📝 Briefs", "🎓 Competency Report",
-                "🎛️ What-If", "🧬 Archetypes & Risk"])
+                "📄 Facts & Health", "🧠 Insights", "📋 Action Plan", "📝 Briefs",
+                "🎓 Competency Report", "🎛️ What-If", "🧬 Archetypes & Risk",
+                "🔗 Cross-dataset"])          # <-- ADDED: tabs[17]
 
 # ---------------------------------------------------------------------------
 #  Analysis layers — shared aggregate, built once from the current selection
@@ -1191,67 +1412,13 @@ def _c_train_early_warning(_agg, agg_sig):
 def _c_cluster_blocks(_agg, agg_sig, k=3):
     return L_models.cluster_blocks(_agg, k=k)
 
-# `context` is the cross-dataset bundle from insights_cross.prepare(). It is
-# built from AGG plus the district file, so agg_sig + ctx_sig together key the
-# cache — NOT the bundle itself, which holds DataFrames and is unhashable.
 @st.cache_data(show_spinner=False)
-def _c_insights_generate(_agg, agg_sig, district, limit=8, min_n=30,
-                         _context=None, ctx_sig=None):
-    return L_insights.generate(_agg, district, limit=limit, min_n=min_n,
-                               context=_context)
+def _c_insights_generate(_agg, agg_sig, district, limit=8):
+    return L_insights.generate(_agg, district, limit=limit)
 
 @st.cache_data(show_spinner=False)
-def _c_insights_describe(_agg, agg_sig, district, min_n=30):
-    return L_insights.describe(_agg, district, min_n=min_n)
-
-@st.cache_data(show_spinner=False)
-def _c_cross_prepare(_agg, agg_sig, _sec, sec_sig, level):
-    return L_cross.prepare(_agg, _sec, level=level)
-
-
-@st.cache_data(show_spinner=False)
-def _c_read_context_file(path, mtime):
-    return pd.read_excel(path)
-
-
-def _find_context_file():
-    """The district-context workbook shipped next to the app, if present."""
-    for cand in ("secondary_dataset.xlsx", "secondary.xlsx"):
-        p = os.path.join(_HERE, cand)
-        if os.path.exists(p):
-            return p, cand
-    return None, None
-
-
-def _insight_context(level=None):
-    """
-    The cross-dataset bundle, shared by the Insights and Action Plan tabs.
-
-    One loader so the two tabs can never disagree about what the district
-    context says. Returns None when there is no context file or the district
-    names cannot be matched — callers then fall back to primary-only output.
-    """
-    path, name = _find_context_file()
-    if path is None or "AGG" not in globals() or AGG is None:
-        return None
-    lvl = level or st.session_state.get("ins_level") or "District"
-    try:
-        sec = _c_read_context_file(path, os.path.getmtime(path))
-        return _c_cross_prepare(AGG, AGG_SIG, sec, f"{name}:{sec.shape}", lvl)
-    except Exception:
-        return None
-
-@st.cache_data(show_spinner=False)
-def _c_playbook_recommend_v3(_agg, agg_sig, district, limit=12, min_n=30,
-                             _context=None, ctx_sig=None):
-    return L_playbook.recommend(_agg, district, limit=limit, min_n=min_n,
-                                context=_context)
-
-@st.cache_data(show_spinner=False)
-def _c_playbook_coverage_v3(_agg, agg_sig, district, min_n=30,
-                            _context=None, ctx_sig=None):
-    return L_playbook.coverage_stats(_agg, district, min_n=min_n,
-                                     context=_context)
+def _c_insights_describe(_agg, agg_sig, district):
+    return L_insights.describe(_agg, district)
 
 @st.cache_data(show_spinner=False)
 def _c_playbook_recommend(_agg, agg_sig, district, limit=12):
@@ -1270,9 +1437,8 @@ def _c_competency_corr(_agg, agg_sig, district):
     return L_competency.correlation_matrix(_agg, district)
 
 @st.cache_data(show_spinner=False)
-def _c_what_if(_agg, agg_sig, district, comp, n_blocks, min_n=30):
-    return L_models.what_if(_agg, district, comp, n_blocks=n_blocks,
-                            min_n=min_n)
+def _c_what_if(_agg, agg_sig, district, comp, n_blocks):
+    return L_models.what_if(_agg, district, comp, n_blocks=n_blocks)
 
 @st.cache_data(show_spinner=False)
 def _c_benchmarks(_agg, agg_sig):
@@ -1287,16 +1453,12 @@ def _c_verbalize_district(_agg, agg_sig, district):
     return L_verbalize.verbalize_district(_agg, district)
 
 @st.cache_data(show_spinner=False)
-def _c_brief_build(_agg, agg_sig, district, role, block, min_n=30,
-                   _context=None, ctx_sig=None):
-    return L_brief.build(_agg, district, role=role, block=block, min_n=min_n,
-                         context=_context)
+def _c_brief_build(_agg, agg_sig, district, role, block):
+    return L_brief.build(_agg, district, role=role, block=block)
 
 @st.cache_data(show_spinner=False)
-def _c_brief_build_all(_agg, agg_sig, district, block, min_n=30,
-                       _context=None, ctx_sig=None):
-    return L_brief.build_all(_agg, district, block=block, min_n=min_n,
-                             context=_context)
+def _c_brief_build_all(_agg, agg_sig, district, block):
+    return L_brief.build_all(_agg, district, block=block)
 
 
 
@@ -1305,7 +1467,12 @@ def _c_brief_build_all(_agg, agg_sig, district, block, min_n=30,
 AGG, AGG_NOTE = _build_agg(_raw_for_layers, _fsig, tuple(hierarchy), score_col,
                            year_col, gender_col, comp_col, grade_col,
                            _below_cut, _above_cut, _finest, _by_grade,
-                           qmap=tuple(sorted(QMAP.items())) if QMAP else None)
+                           qmap=(tuple(sorted(
+                               ((int(y[:4]), g, q), c)
+                               for (y, g), m in RQMAPS.items()
+                               for q, c in m.items())) if RQMAPS
+                               else (tuple(sorted(QMAP.items()))
+                                     if QMAP else None)))
 
 # Small groups produce unstable percentages (one child can swing a block by 20
 # points). This drops them before any finding is generated.
@@ -1745,8 +1912,21 @@ with tabs[1]:
             mode = tc2.radio("View", _modes, horizontal=True, key="trend_mode")
             neon = tc3.toggle("✨ Neon style", value=True, key="neon_trend")
             MIN_N = MINN
+            _pctile = False
+            if RQMAPS and fdf[year_col].nunique() > 1:
+                _pctile = st.toggle(
+                    "🏁 Percentile among peers (paper-proof)",
+                    value=False, key="trend_pctile",
+                    help="The paper changes every year, so raw % mixes "
+                         "learning with paper difficulty. This view shows "
+                         "each unit's standing among all units in the SAME "
+                         "year (same paper) — 50 = middle of the pack. "
+                         "Movement in percentile is real relative change.")
 
             cohort_mode = mode.startswith("🎓")
+            if cohort_mode and RQMAPS:
+                _pctile = True      # three grades = three different papers;
+                                    # raw scores across them are not comparable
             if cohort_mode:
                 # cohort = the year this child was in the LOWEST grade we track.
                 _g0 = int(fdf[_grade_col].min())
@@ -1771,6 +1951,17 @@ with tabs[1]:
             _small = int((t["_n"] < MIN_N).sum())
             t = t[t["_n"] >= MIN_N]
             t["_y"] = _yval(t["_m"]).round(1)
+            if _pctile and (sdim or cohort_mode):
+                # rank among same-year (same-paper) peers -> 0-100 percentile
+                t["_y"] = (t.groupby(xdim)["_m"].rank(pct=True) * 100).round(1)
+                _ylab = (f"percentile among "
+                         f"{'cohorts' if cohort_mode else level + 's'} "
+                         "(same-year peers)")
+                if cohort_mode:
+                    st.caption("🏁 Cohort lines shown as **percentile among "
+                               "cohorts sitting the same paper** — the only "
+                               "fair way to follow children across three "
+                               "different papers.")
 
             # ---- choose which lines to draw: biggest movers, not alphabetical
             _shown, capped, _delta = ["Average"], False, None
@@ -1809,6 +2000,12 @@ with tabs[1]:
                            f"{_last:.1f}")
                 kk3.metric("Change over the period (pts)", f"{_last - _first:+.1f}",
                            delta=f"{_last - _first:+.1f}")
+                st.caption("⚠️ **A different paper is set every year** — "
+                           "year-to-year changes mix real learning with "
+                           "paper difficulty. Within-year comparisons "
+                           "(district vs district, gender, equity) are "
+                           "exact; cross-year lines are best read as "
+                           "relative movement.")
 
             # ---- line chart -------------------------------------------------
             def _series_pts(name):
@@ -1930,7 +2127,11 @@ with tabs[1]:
                            f"and {_xfmt(xs[-1])}. Top = fastest improvement, "
                            "bottom = slowest (declining would show red, leftward). "
                            f"Showing top 10 + bottom 10 of {len(_d)} eligible "
-                           f"{level}s; groups under {MIN_N} students excluded.")
+                           f"{level}s; groups under {MIN_N} students excluded. "
+                           "⚠️ **The test paper changes every year** — "
+                           "cross-year movement partly reflects paper "
+                           "difficulty; read bars as relative (who moved "
+                           "more than peers), not absolute learning gains.")
                 with st.expander(f"Full table — every eligible {level}, every year"):
                     st.caption(f"Each row = one {level}. Yearly columns = its "
                                f"average {_ylab}. 'Change' = last year minus "
@@ -2208,23 +2409,31 @@ with tabs[2]:
                         _dim = comp_col
                     elif _qg:
                         _gb_mode = "Item"
-                        if QMAP:
+                        if QMAP or RQMAPS:
                             _gb_mode = st.radio(
                                 "Break the gap down by", ["Competency", "Item"],
                                 horizontal=True, key="gap_skill_mode")
+                            if RQMAPS and _gb_mode == "Item":
+                                st.caption("⚠️ The paper changes every year "
+                                           "and grade — the same Q number is "
+                                           "a DIFFERENT question in each. "
+                                           "Competency view is the fair "
+                                           "comparison.")
                         _rows = []
-                        if _gb_mode == "Competency" and QMAP:
-                            for comp in (COMP_ORDER or []):
-                                _cc = [q for q in _qg
-                                       if QMAP.get(str(q)) == comp]
-                                if not _cc:
-                                    continue
+                        if _gb_mode == "Competency" and (QMAP or RQMAPS):
+                            _covg = competency_coverage_note(RQMAPS)
+                            if _covg:
+                                st.caption(_covg)
+                            _csf = comp_score_frame(_gg, _qg, RQMAPS, QMAP,
+                                                    year_col or "Year",
+                                                    grade_col or "Grade")
+                            for comp in _csf.columns:
                                 _rows.append({
                                     "Competency": comp,
-                                    "Female": _gg.loc[_gg["_g"] == "Female",
-                                                      _cc].mean().mean() * 100,
-                                    "Male": _gg.loc[_gg["_g"] == "Male",
-                                                    _cc].mean().mean() * 100})
+                                    "Female": _csf.loc[_gg["_g"] == "Female",
+                                                       comp].mean(),
+                                    "Male": _csf.loc[_gg["_g"] == "Male",
+                                                     comp].mean()})
                             _by = pd.DataFrame(_rows).set_index("Competency")
                             _dim = "Competency"
                         else:
@@ -2715,15 +2924,30 @@ with tabs[3]:
         if _qm and _grade_c:
             st.markdown("##### 🔥 Skill × grade — where learning lags")
             _hm_mode = "Item"
-            if QMAP:
+            if QMAP or RQMAPS:
                 _hm_mode = st.radio("Columns", ["Competency", "Item"],
                                     horizontal=True, key="hm_mode")
-            _hm = (_md.groupby(_grade_c)[_qm].mean().mul(100).round(0))
-            if _hm_mode == "Competency" and QMAP:
-                _hm = _hm.T.groupby(
-                    lambda q: QMAP.get(str(q), str(q))).mean().T.round(0)
-                if COMP_ORDER:
-                    _hm = _hm[[c for c in COMP_ORDER if c in _hm.columns]]
+                if RQMAPS and _hm_mode == "Item":
+                    st.caption("⚠️ Q numbers are different questions in "
+                               "each year & grade — compare by Competency.")
+            if _hm_mode == "Competency" and RQMAPS:
+                _csf_hm = comp_score_frame(_md, _qm, RQMAPS, None,
+                                           year_col or "Year",
+                                           grade_col or "Grade")
+                _hm = (_csf_hm.groupby(
+                    pd.to_numeric(_md[_grade_c], errors="coerce"))
+                    .mean().round(0).dropna(axis=1, how="all"))
+                _cov = competency_coverage_note(RQMAPS)
+                if _cov:
+                    st.caption(_cov)
+            else:
+                _hm = (_md.groupby(_grade_c)[_qm].mean().mul(100).round(0))
+                if _hm_mode == "Competency" and QMAP:
+                    _hm = _hm.T.groupby(
+                        lambda q: QMAP.get(str(q), str(q))).mean().T.round(0)
+                    if COMP_ORDER:
+                        _hm = _hm[[c for c in COMP_ORDER
+                                   if c in _hm.columns]]
             _hm.index = ["Grade " + str(int(i)) for i in _hm.index]
             fighm = px.imshow(_hm, color_continuous_scale="RdYlGn",
                               range_color=[0, 100], aspect="auto",
@@ -3332,55 +3556,17 @@ with tabs[6]:
                 bt_pred = pv.apply(bt_project, axis=1).clip(0, 100)
                 bt_real = pv[hold]
                 err = (bt_pred - bt_real).abs()
-                # An error figure alone means nothing without something to
-                # compare it with. The bar any forecast must clear is "assume
-                # nothing changes" — carry last year forward. The Archetypes
-                # tab applies this same test, and its model fails it; showing
-                # it here too keeps the two consistent and is the difference
-                # between "±0.3 points" and "67% better than doing nothing".
-                _naive_pred = pv[years_sorted[-2]]
-                _naive_err = (_naive_pred - bt_real).abs()
-                _n_mae, _t_mae = float(_naive_err.mean()), float(err.mean())
-                _beats = _t_mae < _n_mae
-                _gain = (100 * (_n_mae - _t_mae) / _n_mae) if _n_mae else 0.0
                 real_risk = set(bt_real[bt_real < threshold].index)
                 pred_risk = set(bt_pred[bt_pred < threshold].index)
                 caught = len(real_risk & pred_risk)
-                _naive_caught = len(real_risk &
-                                    set(_naive_pred[_naive_pred < threshold].index))
 
-                b1, b2, b3, b4 = st.columns(4)
+                b1, b2, b3 = st.columns(3)
                 b1.metric("Avg error (points)", f"±{err.mean():.1f}")
-                b2.metric("Naive baseline", f"±{_n_mae:.1f}",
-                          help="'Assume nothing changes' — carry the previous "
-                               "year forward. Any forecast must beat this to "
-                               "be worth using.")
-                b3.metric("Better than naive", f"{_gain:+.0f}%",
-                          delta="beats baseline" if _beats else "FAILS baseline",
-                          delta_color="normal" if _beats else "inverse")
-                b4.metric("At-risk caught",
-                          f"{caught} of {len(real_risk)}" if real_risk else "n/a",
-                          help=f"the naive rule caught {_naive_caught}"
-                               if real_risk else None)
+                b2.metric("Worst error", f"±{err.max():.1f}")
+                b3.metric("At-risk caught", f"{caught} of {len(real_risk)}" if real_risk else "n/a")
                 st.caption(f"Method: trained only on {', '.join(map(str, years_sorted[:-1]))}, "
                            f"predicted {hold} blind, compared against the real {hold} values. "
                            "The model never saw the year it predicted.")
-                if not _beats:
-                    st.error(
-                        f"🚫 **The trend line does not beat assuming nothing "
-                        f"changes** (±{_t_mae:.1f} against ±{_n_mae:.1f}). Do not "
-                        f"present the projections above as forecasts — at this "
-                        f"granularity year-to-year movement is mostly noise, and "
-                        f"carrying the last observed value forward is both simpler "
-                        f"and more accurate.")
-                else:
-                    st.success(
-                        f"✅ On a held-out year the trend projection is "
-                        f"**{_gain:.0f}% more accurate than assuming no change** "
-                        f"(±{_t_mae:.1f} against ±{_n_mae:.1f} points), and catches "
-                        f"{caught} of {len(real_risk)} units that really did fall "
-                        f"below the threshold against the naive rule's "
-                        f"{_naive_caught}.")
                 if len(train_years) < 3:
                     st.warning(
                         f"⚠️ **Interpret this backtest with care.** It trains on only "
@@ -3432,12 +3618,42 @@ with tabs[8]:
             if year_col and year_col in idf.columns:
                 idf = idf[(idf[year_col] >= year_range[0]) & (idf[year_col] <= year_range[1])]
 
+            _lmap, _lnames = dict(QMAP or {}), {}
+            if RQMAPS:
+                st.info("📄 The paper changes every year AND grade — item "
+                        "statistics only make sense within one paper. Pick "
+                        "which paper to analyse:")
+                _pc1, _pc2 = st.columns(2)
+                _yrs = sorted({y for (y, g) in RQMAPS})
+                _sel_y = _pc1.selectbox("Paper year", _yrs,
+                                        index=len(_yrs) - 1, key="ia_year")
+                _grs = sorted({g for (y, g) in RQMAPS if y == _sel_y})
+                _sel_g = _pc2.selectbox("Paper grade", _grs, key="ia_grade")
+                _lmap = RQMAPS.get((_sel_y, _sel_g), {})
+                _lnames = RQNAMES.get((_sel_y, _sel_g), {})
+                if year_col and year_col in idf.columns:
+                    idf = idf[idf[year_col].astype(str).str.contains(
+                        _sel_y[:4])]
+                if grade_col and grade_col in idf.columns:
+                    idf = idf[pd.to_numeric(idf[grade_col],
+                                            errors="coerce") == _sel_g]
+
+            def _cof(q):
+                return _lmap.get(str(q), str(q)) if _lmap else str(q)
+
+            def _qlab(q):
+                nm = _lnames.get(str(q))
+                c = _cof(q)
+                if nm:
+                    return f"{q} · {nm}"
+                return f"{q} · {c}" if c != str(q) else str(q)
+
             IQF = competency_question_filter(idf, "item")
             _pick = [q for q in IQF["questions"] if q in ALL_ITEMS]
             if _pick:
                 item_cols = _pick
             _iby = "Question"
-            if QMAP and len({competency_of(q) for q in item_cols}) < len(item_cols):
+            if _lmap and len({_cof(q) for q in item_cols}) < len(item_cols):
                 _iby = st.radio("Show items as", ["Question", "Competency"],
                                 horizontal=True, key="item_by")
 
@@ -3448,8 +3664,8 @@ with tabs[8]:
                 called 'Algebra' would collide in the bar chart and heatmap.
                 """
                 if _iby == "Competency":
-                    return s.groupby(s.index.map(competency_of)).mean()
-                return s.set_axis([question_label(i) for i in s.index])
+                    return s.groupby(s.index.map(_cof)).mean()
+                return s.set_axis([_qlab(i) for i in s.index])
 
             st.caption(f"{len(idf):,} student responses × {len(item_cols)} of "
                        f"{len(ALL_ITEMS)} items in current selection")
@@ -3488,9 +3704,9 @@ with tabs[8]:
                 dim = st.selectbox("Break down items by", dim_pool)
                 heat = idf.groupby(dim)[item_cols].mean().mul(100)
                 # same aggregate-don't-rename rule as the bar chart above
-                heat = (heat.T.groupby(heat.columns.map(competency_of)).mean().T
+                heat = (heat.T.groupby(heat.columns.map(_cof)).mean().T
                         if _iby == "Competency"
-                        else heat.set_axis([question_label(c)
+                        else heat.set_axis([_qlab(c)
                                             for c in heat.columns], axis=1))
                 heat = heat.round(1)
                 figh = px.imshow(heat, color_continuous_scale="RdYlGn",
@@ -3530,13 +3746,16 @@ with tabs[8]:
                                   labels={"difficulty": "% correct (easy →)",
                                           "discrimination":
                                           "Discrimination (top 27% − bottom 27%)"})
-                if QMAP:
+                if _lmap:
                     _qual["Competency"] = _qual["Item"].map(
-                        lambda q: QMAP.get(str(q), "—"))
-                    figq.update_traces(customdata=_qual[["Competency"]],
-                                       hovertemplate="<b>%{text}</b> · "
-                                       "%{customdata[0]}<br>%{x:.0f}% correct · "
-                                       "discrimination %{y:.2f}<extra></extra>")
+                        lambda q: _lmap.get(str(q), "—"))
+                    _qual["QName"] = _qual["Item"].map(
+                        lambda q: _lnames.get(str(q), ""))
+                    figq.update_traces(
+                        customdata=_qual[["Competency", "QName"]],
+                        hovertemplate="<b>%{text}</b> · %{customdata[0]}"
+                        "<br>%{customdata[1]}<br>%{x:.0f}% correct · "
+                        "discrimination %{y:.2f}<extra></extra>")
                 figq.update_traces(textposition="top center", marker_size=11)
                 figq.add_hline(y=0.2, line_dash="dash", line_color="gray",
                                annotation_text="0.2 = review threshold",
@@ -3969,8 +4188,7 @@ with tabs[10]:
 
             # ---- brief clause traceability -------------------------------------
             with st.expander("How the district brief's clauses are computed"):
-                st.dataframe(pd.DataFrame(L_brief.build_breakdown(
-                    AGG, d_f, min_n=MINN, context=_insight_context())),
+                st.dataframe(pd.DataFrame(L_brief.build_breakdown(AGG, d_f)),
                              use_container_width=True, hide_index=True)
     _tab10_fragment()
 
@@ -3978,85 +4196,25 @@ with tabs[10]:
 # ============================================================================
 #  Tab 11 — Insights   (ranked findings from the generator suite)
 # ============================================================================
-with tabs[12]:
+with tabs[11]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab11_fragment():
         st.subheader("🧠 Ranked Insights")
         if not _needs_agg():
 
-            # ---- what the assessment file says, plus what district context
-            # adds. Both families score in the same unit (points of the
-            # outcome), so they rank against each other in one list.
-            ic1, ic2 = st.columns([1, 1])
             d_ins = _pick_district("ins_dist")
-            _lvl = ic1.radio(
-                "Analyse district context at", list(L_cross.LEVELS),
-                horizontal=True, key="ins_level",
-                help="Districts rolled up into the group they belong to in "
-                     "your data. Counts are summed, rates size-weighted. "
-                     "Fewer units measure each one more precisely but leave "
-                     "too few points to correlate — the tab says so when that "
-                     "happens rather than reporting a number nobody should "
-                     "read.")
-
-            # the district-context file, via the shared loader
-            _sec_path, _sec_name = _find_context_file()
-            _ctx = _insight_context(_lvl)
-            if _ctx:
-                _u, _lv = _ctx["n_units"], _ctx["level"].lower()
-                ic2.metric(f"{_ctx['level']}s in the analysis", _u,
-                           help=f"smallest detectable |r| here: "
-                                f"{_ctx['min_detectable_r']:.2f}")
-                if _ctx.get("descriptive_only"):
-                    ic2.caption(f"⚠️ {_u} {_lv}s — too few to correlate, so "
-                                f"comparisons only.")
-            elif _sec_path is None:
-                ic2.caption("No district-context file found next to the app — "
-                            "primary insights only.")
-            else:
-                ic2.caption("District names could not be matched to the "
-                            "context file — primary insights only.")
-
-            items = _c_insights_generate(
-                AGG, AGG_SIG, d_ins, limit=8, min_n=MINN, _context=_ctx,
-                ctx_sig=(f"{_lvl}:{_ctx['n_units']}" if _ctx else "none"))
+            items = _c_insights_generate(AGG, AGG_SIG, d_ins, limit=8)
             if not items:
-                st.info(f"No findings passed the {MINN}-student minimum and "
-                        f"the evidence threshold for this selection. Lower "
-                        f"'Min students per group' in the sidebar to see "
-                        f"weaker signals — they will be less reliable.")
+                st.info("No findings passed the significance and magnitude thresholds "
+                        "for this selection.")
             for i, it in enumerate(items, 1):
-                _tag = ("🔗" if str(it.get("source", "")).startswith("x_")
-                        else "📊")
-                st.markdown(f"**{i}. {_tag} `{it['category']}`** — {it['text']}")
-                st.caption(f"↳ {it['evidence']}"
-                           + (f"  ·  `{it['source']}`" if it.get("source")
-                              else ""))
-            if items:
-                st.caption("📊 = from the assessment file · 🔗 = from the "
-                           "district-context join. Ranked by evidence — the "
-                           "lower bound of the effect, so a big number from a "
-                           "tiny group cannot outrank a solid one.")
+                st.markdown(f"**{i}. `{it['category']}`** — {it['text']}")
+                st.caption(f"↳ {it['evidence']}")
 
             with st.expander("Generator coverage"):
-                reg = pd.DataFrame(_c_insights_describe(AGG, AGG_SIG, d_ins,
-                                                        min_n=MINN))
-                if _ctx:
-                    reg = pd.concat(
-                        [reg, pd.DataFrame(L_cross.describe(_ctx, d_ins))],
-                        ignore_index=True)
+                reg = pd.DataFrame(_c_insights_describe(AGG, AGG_SIG, d_ins))
                 st.dataframe(reg, use_container_width=True, hide_index=True)
-                _errs = L_insights.ERRORS + L_cross.ERRORS
-                if _errs:
-                    st.error(f"⚠️ {len(_errs)} generator(s) raised: "
-                             + "; ".join(f"{e['generator']}: {e['error']}"
-                                         for e in _errs[:3]))
-                if _ctx and _ctx.get("rollup_rules"):
-                    st.caption("How the context file was rolled up: "
-                               + " · ".join(f"**{k}** {v}" for k, v in
-                                            list(_ctx["rollup_rules"].items())[:6])
-                               + " …")
 
             f = L_charts.insight_scores(items)
             if f:
@@ -4067,45 +4225,25 @@ with tabs[12]:
 # ============================================================================
 #  Tab 12 — Action Plan   (composed intervention recommendations)
 # ============================================================================
-with tabs[13]:
+with tabs[12]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab12_fragment():
         st.subheader("📋 Action Plan")
         if not _needs_agg():
             d_act = _pick_district("act_dist")
-            # the same district-context bundle the Insights tab uses, so an
-            # action can say "…but this district already beats its
-            # circumstances, so the fix is local"
-            _actx = _insight_context()
-            _asig = (f"{_actx['level']}:{_actx['n_units']}" if _actx else "none")
-            cov = _c_playbook_coverage_v3(AGG, AGG_SIG, d_act, min_n=MINN,
-                                          _context=_actx, ctx_sig=_asig)
+            cov = _c_playbook_coverage(AGG, AGG_SIG, d_act)
             if cov:
-                k = st.columns(5)
+                k = st.columns(4)
                 k[0].metric("Recommendations", cov["recommendations_generated"])
                 k[1].metric("Unique rule combos", cov["unique_rule_combinations"])
-                k[2].metric("Possible combinations",
-                            f"{cov['distinct_outputs']:,}",
-                            help=f"{cov['base_actions']} base actions × "
-                                 f"{cov['clause_subsets']} clause combinations "
-                                 f"(up to {cov['max_clauses_shown']} shown at "
-                                 f"once). Computed from the rules, not "
-                                 f"hardcoded.")
+                k[2].metric("Possible combinations", f"{cov['theoretical_combinations']:,}")
                 k[3].metric("With a peer model", cov["with_peer_model"])
-                k[4].metric("Using district context",
-                            cov.get("using_district_context", 0),
-                            help="Actions whose advice changed because of the "
-                                 "cross-dataset join.")
 
-            recs = _c_playbook_recommend_v3(AGG, AGG_SIG, d_act, limit=12,
-                                            min_n=MINN, _context=_actx,
-                                            ctx_sig=_asig)
+            recs = _c_playbook_recommend(AGG, AGG_SIG, d_act, limit=12)
             if not recs:
-                st.success(f"No block-competency pairing met the criteria for "
-                           f"intervention in this selection — every group is "
-                           f"either performing adequately or below the "
-                           f"{MINN}-student minimum needed to act on.")
+                st.success("No block-competency pairing met the criteria for "
+                           "intervention in this selection.")
             for r in recs:
                 with st.container(border=True):
                     head = f"**{r['priority']}** · {r['block']} — {r['competency']}"
@@ -4117,15 +4255,14 @@ with tabs[13]:
                                + (f"  ·  also applies: {r['also_applies']}"
                                   if r["also_applies"] else ""))
 
-            st.plotly_chart(L_charts.playbook_grid(AGG, d_act, min_n=MINN),
-                            use_container_width=True)
+            st.plotly_chart(L_charts.playbook_grid(AGG, d_act), use_container_width=True)
     _tab12_fragment()
 
 
 # ============================================================================
 #  Tab 13 — Briefs   (role-based narrative)
 # ============================================================================
-with tabs[14]:
+with tabs[13]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab13_fragment():
@@ -4142,12 +4279,7 @@ with tabs[14]:
             with c2:
                 blk = st.selectbox("Block (for the block brief)", blocks, key="br_blk")
 
-            # same district-context bundle the Insights and Action Plan tabs
-            # use, so a brief cannot contradict either of them
-            _bctx = _insight_context()
-            _bsig = (f"{_bctx['level']}:{_bctx['n_units']}" if _bctx else "none")
-            b = _c_brief_build(AGG, AGG_SIG, d_br, role, blk, min_n=MINN,
-                               _context=_bctx, ctx_sig=_bsig)
+            b = _c_brief_build(AGG, AGG_SIG, d_br, role, blk)
             if b:
                 meta = L_brief.ROLES[role]
                 st.caption(f"**Scope:** {b['scope']}  ·  **Sees:** {meta['scope']}  ·  "
@@ -4169,7 +4301,7 @@ with tabs[14]:
 # ============================================================================
 #  Tab 14 — Competency Report   (per-competency deep dive)
 # ============================================================================
-with tabs[15]:
+with tabs[14]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab14_fragment():
@@ -4256,7 +4388,7 @@ with tabs[15]:
 # ============================================================================
 #  Tab 14 — What-If scenario planner
 # ============================================================================
-with tabs[16]:
+with tabs[15]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab15_fragment():
@@ -4274,7 +4406,7 @@ with tabs[16]:
 
             bench = _c_benchmarks(AGG, AGG_SIG)
             rebound = _c_rebound(AGG, AGG_SIG)
-            w = _c_what_if(AGG, AGG_SIG, d_wi, comp_wi, n_blocks, min_n=MINN)
+            w = _c_what_if(AGG, AGG_SIG, d_wi, comp_wi, n_blocks)
 
             if w is None or not w["scenarios"]:
                 st.info("Not enough history in this selection to model a scenario. "
@@ -4349,7 +4481,7 @@ with tabs[16]:
 # ============================================================================
 #  Tab 15 — Learning archetypes (KMeans) + risk model
 # ============================================================================
-with tabs[17]:
+with tabs[16]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab16_fragment():
@@ -4392,16 +4524,9 @@ with tabs[17]:
                 if not ew["beats_naive"]:
                     st.error(
                         "🚫 **This model does not beat simply assuming nothing changes.** "
-                        f"Its error is {ew['mae']} points against the naive baseline's "
-                        f"{ew['naive_mae']} — so year-to-year movement at this "
-                        "granularity is mostly noise, and no forecast is offered below. "
-                        "The watchlist instead uses the naive rule, which is the better "
-                        "predictor here.")
-                    st.caption(
-                        f"R² is {ew['r2']}, which looks strong and is misleading: a unit "
-                        f"at 60% this year is near 60% next year, so simply copying last "
-                        f"year's number already earns a high R². Error against the naive "
-                        f"baseline is the test that matters, and this model fails it.")
+                        "Do not present it as a forecast — report the naive baseline "
+                        "instead and say the data does not support prediction at this "
+                        "granularity.")
                 else:
                     st.success(
                         f"✅ On a held-out year the model is **{ew['improvement_pct']}% more "
@@ -4409,36 +4534,9 @@ with tabs[17]:
                         f"{ew['recall']*100:.0f}% of the units that actually ended up "
                         f"below the risk line (precision {ew['precision']*100:.0f}%).")
 
-                # Never print a forecast under a banner telling the reader not to
-                # trust one. When the model loses to persistence, show what the
-                # naive rule flags — same rows, ranked by something defensible.
-                if ew["beats_naive"]:
-                    st.markdown(f"**Forecast for {ew['forecast_year']} — "
-                                f"highest predicted risk**")
-                    st.dataframe(ew["forecast"].head(15),
-                                 use_container_width=True, hide_index=True)
-                else:
-                    _cut = ew.get("risk_cut", 50.0)
-                    st.markdown(f"**Watchlist for {ew['forecast_year']} — "
-                                f"units already above {_cut:.0f}% below grade level "
-                                f"in {ew.get('last_observed_year', '')}**")
-                    st.dataframe(ew["naive_watchlist"].head(15),
-                                 use_container_width=True, hide_index=True)
-                    st.caption(
-                        f"Not a prediction — these are the units that are already "
-                        f"struggling, on the assumption that nothing changes. On the "
-                        f"held-out year that rule caught "
-                        f"{ew.get('naive_recall', 0)*100:.0f}% of the units that did end "
-                        f"up at risk (precision "
-                        f"{ew.get('naive_precision', 0)*100:.0f}%), against the model's "
-                        f"{ew['recall']*100:.0f}% / {ew['precision']*100:.0f}%. Acting on "
-                        f"today's worst units is the defensible move when next year "
-                        f"cannot be predicted.")
-                    with st.expander("Model output anyway (not usable as a forecast)"):
-                        st.dataframe(ew["forecast"].head(15),
-                                     use_container_width=True, hide_index=True)
-                        st.caption("Shown for transparency only — it failed the "
-                                   "baseline test above.")
+                st.markdown(f"**Forecast for {ew['forecast_year']} — highest predicted risk**")
+                st.dataframe(ew["forecast"].head(15), use_container_width=True,
+                             hide_index=True)
 
                 with st.expander("What the model learned"):
                     st.dataframe(pd.DataFrame(
@@ -4463,7 +4561,7 @@ with tabs[17]:
 #  uploaded district-level file, calls secondary.py, renders. It does not
 #  modify anything above this line.
 # ============================================================================
-with tabs[11]:
+with tabs[17]:
     @st.fragment
     def _tab17_fragment():
         st.subheader("🔗 Cross-dataset — does district context explain results?")

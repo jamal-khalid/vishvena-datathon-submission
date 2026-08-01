@@ -337,16 +337,15 @@ def _mission_specs(d: pd.DataFrame) -> dict:
                  "Connectivity, institutions and tech employers cluster in "
                  "urban areas — urban share captures that density."),
             ],
-            "competencies": ["Logical Reasoning", "Problem Solving",
-                             "Numeracy"],
+            "competencies": ["number sense", "data handling", "division"],
             "comp_whys": {
-                "Logical Reasoning": "The core cognitive skill of AI work "
-                    "— pattern recognition, if-then thinking, deduction.",
-                "Problem Solving": "Turning a messy situation into "
-                    "solvable steps: what engineers and data scientists "
-                    "do all day.",
-                "Numeracy": "All of AI stands on mathematics; comfort "
-                    "with numbers is the entry ticket."},
+                "number sense": "Comfort with numbers is the entry "
+                    "ticket to every quantitative field AI draws on.",
+                "data handling": "Reading and reasoning about data — "
+                    "literally the raw material of AI (tested from "
+                    "2023-24 onward).",
+                "division": "The most structure-demanding operation — "
+                    "a proxy for algorithmic, stepwise thinking."},
             "comp_reason": ("No single skill makes an AI-ready child — but "
                             "a district whose children can reason, "
                             "decompose problems AND handle numbers is "
@@ -389,14 +388,14 @@ def _mission_specs(d: pd.DataFrame) -> dict:
                  "Reading material beyond the textbook is what FLN "
                  "practice runs on."),
             ],
-            "competencies": ["Numeracy", "Arithmetic", "Problem Solving"],
+            "competencies": ["number sense", "addition", "subtraction"],
             "comp_whys": {
-                "Numeracy": "Number sense — the first pillar NIPUN "
-                    "Bharat names.",
-                "Arithmetic": "Operations fluency — the second pillar, "
-                    "and the gateway to all later maths.",
-                "Problem Solving": "Applying both to a real question — "
-                    "the proof that the foundation actually holds."},
+                "number sense": "The first pillar of foundational "
+                    "numeracy that NIPUN Bharat names.",
+                "addition": "The first operation every child must "
+                    "own — tested in every paper, every year.",
+                "subtraction": "The operation where foundational gaps "
+                    "first become visible (borrowing)."},
             "comp_reason": ("Together these three ARE foundational "
                             "numeracy — the exact outcome NIPUN Bharat "
                             "exists to secure by Grade 5. Their combined "
@@ -429,16 +428,15 @@ def _mission_specs(d: pd.DataFrame) -> dict:
                  d["Primary Teachers Female"] / d["Primary Teachers Total"],
                  "Girls who see women teaching stay in school longer."),
             ],
-            "competencies": ["Numeracy", "Arithmetic", "Logical Reasoning"],
+            "competencies": ["number sense", "multiplication", "division"],
             "comp_whys": {
-                "Numeracy": "The subject with the most persistent "
-                    "gender stereotype — where girls' progress is the "
+                "number sense": "The area carrying the oldest "
+                    "girls-and-maths stereotype — progress here is the "
                     "sharpest signal.",
-                "Arithmetic": "Fluency that translates directly into "
-                    "staying with maths in higher grades.",
-                "Logical Reasoning": "Higher-order thinking — beyond "
-                    "rote, the skill that predicts girls continuing "
-                    "into STEM."},
+                "multiplication": "Fluency that decides whether girls "
+                    "stay comfortable in maths through upper primary.",
+                "division": "The hardest core operation — where "
+                    "confidence gaps show first."},
             "comp_reason": ("Scored on GIRLS only. The mission question "
                             "is not whether the district scores well — "
                             "it is how girls themselves perform where "
@@ -475,15 +473,16 @@ def _mission_specs(d: pd.DataFrame) -> dict:
                  "A small town-village gap means literacy reaches "
                  "everywhere, not just district headquarters."),
             ],
-            "competencies": ["Logical Reasoning", "Problem Solving",
-                             "Geometry"],
+            "competencies": ["measurement", "shapes", "data handling"],
             "comp_whys": {
-                "Logical Reasoning": "Grows from conversation and "
-                    "reading at home more than from drilling.",
-                "Problem Solving": "Word-problem comprehension — a "
-                    "child must READ the problem before solving it.",
-                "Geometry": "Spatial language and reasoning, strongly "
-                    "shaped by the vocabulary of the home."},
+                "measurement": "Calendars, clocks, weights, lengths — "
+                    "skills practised in daily home life, not just "
+                    "class.",
+                "shapes": "Spatial language and pattern-spotting, "
+                    "strongly shaped by the vocabulary of the home.",
+                "data handling": "Observing and analysing — the "
+                    "comprehension-heavy skill a literate home "
+                    "nurtures."},
             "comp_reason": ("The three most comprehension-heavy skills — "
                             "the ones a literate home environment shapes "
                             "most and rote drilling shapes least. Their "
@@ -502,20 +501,17 @@ def _index_series(spec: dict) -> pd.Series:
 # primary-data helpers
 # --------------------------------------------------------------------------
 def _primary_district_scores(df, spec, qmap):
-    """Per-district avg % on the mission's 3 competencies. None if impossible."""
+    """Per-district avg % on the mission's 3 competencies.
+
+    `qmap` is either flat {"Q1": comp} or per-paper {(year, grade): {Q:
+    comp}} — the real GP contest sets a different paper every year+grade,
+    so each (year, grade) chunk must be scored against ITS OWN mapping."""
     if df is None or not qmap:
         return None, "no data"
     dist_col = next((c for c in df.columns
                      if str(c).strip().lower() == "district"), None)
     if dist_col is None:
         return None, "no district column"
-    comp_items = {}
-    for q, comp in qmap.items():
-        comp_items.setdefault(comp, []).append(q)
-    items = [q for comp in spec["competencies"]
-             for q in comp_items.get(comp, []) if q in df.columns]
-    if not items:
-        return None, "no matching item columns"
     sub = df
     if spec.get("girls_only"):
         gcol = next((c for c in df.columns
@@ -523,8 +519,44 @@ def _primary_district_scores(df, spec, qmap):
         if gcol is not None:
             g = df[gcol].astype(str).str.strip().str.lower()
             sub = df[g.isin(["f", "female", "girl"])]
-    s = (sub.groupby(sub[dist_col].astype(str).str.strip()
-                     .replace(CANON))[items].mean().mean(axis=1) * 100)
+    _dist = sub[dist_col].astype(str).str.strip().replace(CANON)
+    want = set(spec["competencies"])
+    _multi = any(isinstance(k, tuple) for k in qmap)
+    if not _multi:
+        items = [q for q, c in qmap.items()
+                 if c in want and q in sub.columns]
+        if not items:
+            return None, "no matching item columns"
+        s = (sub.groupby(_dist)[items].mean().mean(axis=1) * 100)
+        s.index.name = "District"
+        return s, None
+    ycol = next((c for c in sub.columns
+                 if str(c).strip().lower() == "year"), None)
+    gcol2 = next((c for c in sub.columns
+                  if str(c).strip().lower() == "grade"), None)
+    if not (ycol and gcol2):
+        return None, "no Year/Grade columns for per-paper scoring"
+    num, den = {}, {}
+    for (y, g), m in qmap.items():
+        items = [q for q, c in m.items() if c in want and q in sub.columns]
+        if not items:
+            continue
+        chunk = sub[(sub[ycol].astype(str) == str(y))
+                    & (pd.to_numeric(sub[gcol2], errors="coerce")
+                       == int(g))]
+        if chunk.empty:
+            continue
+        _d = _dist.loc[chunk.index]
+        per = chunk[items].mean(axis=1)
+        agg_s = per.groupby(_d).sum()
+        agg_n = per.groupby(_d).count()
+        for k, v in agg_s.items():
+            num[k] = num.get(k, 0.0) + float(v)
+        for k, v in agg_n.items():
+            den[k] = den.get(k, 0) + int(v)
+    if not den:
+        return None, "no matching item columns"
+    s = pd.Series({k: num[k] / den[k] * 100 for k in den if den[k]})
     s.index.name = "District"
     return s, None
 
