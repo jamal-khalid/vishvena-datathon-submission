@@ -536,12 +536,17 @@ def _primary_district_scores(df, spec, qmap):
                   if str(c).strip().lower() == "grade"), None)
     if not (ycol and gcol2):
         return None, "no Year/Grade columns for per-paper scoring"
+
+    def _yk(v):
+        m2 = re.search(r"(20\d\d)", str(v))
+        return int(m2.group(1)) if m2 else None
+    _ykey = sub[ycol].map(_yk)
     num, den = {}, {}
     for (y, g), m in qmap.items():
         items = [q for q, c in m.items() if c in want and q in sub.columns]
         if not items:
             continue
-        chunk = sub[(sub[ycol].astype(str) == str(y))
+        chunk = sub[(_ykey == _yk(y))
                     & (pd.to_numeric(sub[gcol2], errors="coerce")
                        == int(g))]
         if chunk.empty:

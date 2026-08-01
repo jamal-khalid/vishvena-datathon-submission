@@ -311,6 +311,23 @@ KA_DIVISION = {
 }
 
 
+def _year_key(y):
+    """'2022-23' / '2022' / 2022 -> 2022 (int start year)."""
+    m = re.search(r"(20\d\d)", str(y))
+    return int(m.group(1)) if m else None
+
+
+def _rq_norm(rqmaps):
+    """Per-paper maps re-keyed to (start_year_int, grade_int) so lookups
+    survive the app's Year parsing ('2022-23' -> 2022)."""
+    out = {}
+    for (y, g), m in (rqmaps or {}).items():
+        yk = _year_key(y)
+        if yk is not None:
+            out[(yk, int(g))] = m
+    return out
+
+
 def competency_coverage_note(rqmaps):
     """One honest line about competencies NOT tested in every paper,
     generated from the embedded maps themselves."""
@@ -350,11 +367,13 @@ def comp_score_frame(frame, item_cols, rqmaps, flat_qmap=None,
                    | set((flat_qmap or {}).values()))
     out = pd.DataFrame(index=frame.index, columns=comps, dtype=float)
     if rqmaps and year_col in frame.columns and grade_col in frame.columns:
+        _rq = _rq_norm(rqmaps)
         _yg = frame.groupby([frame[year_col].astype(str),
                              pd.to_numeric(frame[grade_col],
                                            errors="coerce")]).groups
         for (y, g), idx in _yg.items():
-            m = rqmaps.get((str(y), int(g)) if not pd.isna(g) else None)
+            m = (_rq.get((_year_key(y), int(g)))
+                 if not pd.isna(g) and _year_key(y) is not None else None)
             if not m:
                 continue
             for comp in comps:
@@ -840,7 +859,8 @@ _CACHE_FILE = os.path.join(_UPLOAD_CACHE, "last_upload.parquet")
 if uploaded:
     st.session_state["_had_upload"] = True
 elif st.session_state.get("_had_upload"):
-    for _p in (_CACHE_FILE, _CACHE_FILE + ".meta.json"):
+    for _p in (_CACHE_FILE, _CACHE_FILE + ".meta.json",
+               _CACHE_FILE + ".qmaps.json"):
         try:
             os.remove(_p)
         except OSError:
@@ -871,11 +891,12 @@ if (not uploaded and not _picked_local and os.path.exists(_CACHE_FILE)
         + "<div style='color:#9CA3AF; font-size:11px;'>Upload again to "
           "replace.</div></div>", unsafe_allow_html=True)
     if st.sidebar.button("🗑️ Forget restored dataset"):
-        try:
-            os.remove(_CACHE_FILE)
-            os.remove(_CACHE_FILE + ".meta.json")
-        except OSError:
-            pass
+        for _px in (_CACHE_FILE, _CACHE_FILE + ".meta.json",
+                    _CACHE_FILE + ".qmaps.json"):
+            try:
+                os.remove(_px)
+            except OSError:
+                pass
         st.session_state.pop("_pcache_sig", None)
         st.rerun()
 
@@ -932,6 +953,19 @@ if "Score" not in df.columns and _qitem_cols:
 
 # ---- per-paper competency maps embedded in the workbooks ------------------
 RQMAPS, RQNAMES = extract_embedded_qmaps(_sources, _fsig)
+if not RQMAPS and _picked_local == [_CACHE_FILE]:
+    # restored from the parquet cache: parquet has no sheets, so the
+    # embedded maps live in a JSON sidecar written at upload time
+    try:
+        import json as _json
+        with open(_CACHE_FILE + ".qmaps.json") as _qf:
+            _qj = _json.load(_qf)
+        RQMAPS = {(k.split("|")[0], int(k.split("|")[1])): v
+                  for k, v in _qj.get("maps", {}).items()}
+        RQNAMES = {(k.split("|")[0], int(k.split("|")[1])): v
+                   for k, v in _qj.get("names", {}).items()}
+    except Exception:
+        pass
 if RQMAPS:
     _n_comps = len({c for m in RQMAPS.values() for c in m.values()})
     st.sidebar.success(f"🗺️ Competency maps read from the workbooks: "
@@ -952,6 +986,14 @@ if uploaded and st.session_state.get("_pcache_sig") != _fsig:
             with open(_CACHE_FILE + ".meta.json", "w") as _mf:
                 _json.dump({"names": [n for n, _ in _sources],
                             "rows": int(len(df))}, _mf)
+            if RQMAPS:
+                with open(_CACHE_FILE + ".qmaps.json", "w") as _qf:
+                    _json.dump(
+                        {"maps": {f"{y}|{g}": m
+                                  for (y, g), m in RQMAPS.items()},
+                         "names": {f"{y}|{g}": n
+                                   for (y, g), n in RQNAMES.items()}},
+                        _qf)
         st.session_state["_pcache_sig"] = _fsig
     except Exception:
         pass          # caching is best-effort; analysis continues either way
@@ -1215,27 +1257,58 @@ def competency_question_filter(frame, key, box=None, show=True):
     if not qs:
         return res
 
-    cmap = {q: competency_of(q) for q in qs}
-    comps = list(dict.fromkeys(cmap[q] for q in qs))
-    # Only offer the competency box when the map actually groups things. With
-    # no map loaded every question is its own "competency" and the two boxes
-    # would be duplicates of each other.
-    mapped = bool(QMAP) and len(comps) < len(qs)
+    # Which paper(s) does this frame span? With the real GP contest the
+    # paper changes every year AND grade, so the same Q id is a different
+    # question in each — Q-level selection is only valid inside ONE paper.
+    _ycol = next((c for c in frame.columns
+                  if str(c).strip().lower() == "year"), None)
+    _gcol = next((c for c in frame.columns
+                  if str(c).strip().lower() == "grade"), None)
+    _paper = None
+    if RQMAPS and _ycol and _gcol:
+        _ys = frame[_ycol].astype(str).unique()
+        _gs = pd.to_numeric(frame[_gcol], errors="coerce").dropna().unique()
+        if len(_ys) == 1 and len(_gs) == 1:
+            _paper = (str(_ys[0]), int(_gs[0]))
+
+    if RQMAPS:
+        if _paper and _paper in RQMAPS:
+            cmap = {q: RQMAPS[_paper].get(str(q), str(q)) for q in qs}
+        else:
+            cmap = {q: str(q) for q in qs}      # ambiguous across papers
+        comps = sorted({c for m in RQMAPS.values() for c in m.values()})
+        mapped = True
+    else:
+        cmap = {q: competency_of(q) for q in qs}
+        comps = list(dict.fromkeys(cmap[q] for q in qs))
+        # Only offer the competency box when the map actually groups things.
+        mapped = bool(QMAP) and len(comps) < len(qs)
 
     csel, qsel = [], []
     if show:
         _fc = box.columns([1, 1.3])
         csel = (_fc[0].multiselect(
-            f"🎯 Competency — {len(comps)} in the question map", comps,
+            f"🎯 Competency — {len(comps)} in this assessment", comps,
             default=[], key=f"{key}_comp", placeholder="All competencies",
-            help="Groups from the question-map CSV. Picking one narrows the "
-                 "question list beside it.") if mapped else [])
-        pool = [q for q in qs if not csel or cmap[q] in csel]
-        qsel = _fc[1].multiselect(
-            f"❓ Question — {len(pool)} available", pool, default=[],
-            key=f"{key}_q", placeholder="All questions in that selection",
-            format_func=(lambda q: f"{q} · {cmap[q]}") if mapped else str,
-            help="Leave empty for every question above.")
+            help=("Paper-proof: each child is scored on THEIR paper's "
+                  "questions for the chosen competency, so this works "
+                  "across years and grades." if RQMAPS else
+                  "Groups from the question map. Picking one narrows the "
+                  "question list beside it.")) if mapped else [])
+        if RQMAPS and _paper is None:
+            # multiple papers in view: hide the per-question box entirely
+            pool, qsel = list(qs), []
+            _fc[1].caption("❓ Question-level selection needs ONE paper — "
+                           "filter the sidebar to a single year + grade "
+                           "(or use Item Analysis, which picks a paper). "
+                           "Q ids are different questions in each paper.")
+        else:
+            pool = [q for q in qs if not csel or cmap[q] in csel]
+            qsel = _fc[1].multiselect(
+                f"❓ Question — {len(pool)} available", pool, default=[],
+                key=f"{key}_q", placeholder="All questions in that selection",
+                format_func=(lambda q: f"{q} · {cmap[q]}") if mapped else str,
+                help="Leave empty for every question above.")
     else:
         pool = list(qs)
 
@@ -1253,7 +1326,29 @@ def competency_question_filter(frame, key, box=None, show=True):
                                  .isin(set(map(str, sel)))]
     else:                                   # wide: rebuild the % from columns
         _f = frame
-        if res["narrowed"]:
+        if RQMAPS and csel and not qsel:
+            # competency pick with per-paper maps: each (year, grade) chunk
+            # is scored on ITS OWN paper's items for those competencies
+            _f = frame.copy()
+            _f["_qsel_pct"] = np.nan
+            _grp = _f.groupby([_f[_ycol].astype(str),
+                               pd.to_numeric(_f[_gcol], errors="coerce")]
+                              ).groups if (_ycol and _gcol) else {}
+            _rqn = _rq_norm(RQMAPS)
+            for (y, g), idx in _grp.items():
+                m = (_rqn.get((_year_key(y), int(g)))
+                     if pd.notna(g) and _year_key(y) is not None else None)
+                if not m:
+                    continue
+                cc = [q for q, c in m.items()
+                      if c in set(csel) and q in _f.columns]
+                if cc:
+                    _f.loc[idx, "_qsel_pct"] = (
+                        _f.loc[idx, cc].mean(axis=1) * 100.0)
+            _f = _f[_f["_qsel_pct"].notna()]
+            res["narrowed"] = True
+            res["questions"] = sel
+        elif res["narrowed"]:
             _f = frame.copy()
             _f["_qsel_pct"] = _f[sel].mean(axis=1) * 100.0
         elif (score_col in frame.columns
@@ -1268,11 +1363,22 @@ def competency_question_filter(frame, key, box=None, show=True):
                        label="% correct")
 
     if res["narrowed"]:
-        box.caption(
-            f"🔎 **{len(sel)} of {len(qs)} questions** selected"
-            + (f" · competencies: {', '.join(map(str, csel))}" if csel else "")
-            + " — every number below is *% correct on these questions only*, "
-              "not the child's overall score.")
+        if RQMAPS and csel and not qsel:
+            box.caption(
+                f"🔎 Scoring **{', '.join(map(str, csel))}** — each child "
+                "is measured on their own paper's questions for "
+                + ("this competency" if len(csel) == 1
+                   else "these competencies")
+                + " (the paper changes per year & grade). Children whose "
+                  "paper didn't test it are excluded — see the coverage "
+                  "note on the Competencies tab.")
+        else:
+            box.caption(
+                f"🔎 **{len(sel)} of {len(qs)} questions** selected"
+                + (f" · competencies: {', '.join(map(str, csel))}"
+                   if csel else "")
+                + " — every number below is *% correct on these questions "
+                  "only*, not the child's overall score.")
     return res
 
 
@@ -1944,6 +2050,12 @@ with tabs[0]:
                                        max_selections=6, key="cmp_picks")
                 # Optional refinement: narrow the comparison to a specific slice
                 refine_dims = extra_dims
+                if RQMAPS:
+                    # real GP contest: "Q3" is a DIFFERENT question in every
+                    # year & grade, so filtering rows by a Q answer would mix
+                    # unrelated questions — drop item columns from the picker
+                    refine_dims = [c for c in refine_dims
+                                   if not re.fullmatch(r"[Qq]\d+", str(c))]
                 rc1, rc2 = st.columns(2)
                 rdim = rc1.selectbox("Refine by (optional)", ["None"] + refine_dims,
                                      key="cmp_refine_dim")
@@ -2304,7 +2416,7 @@ with tabs[2]:
             if RQMAPS and fdf[year_col].nunique() > 1:
                 _pctile = st.toggle(
                     "🏁 Percentile among peers (paper-proof)",
-                    value=False, key="trend_pctile",
+                    value=True, key="trend_pctile",
                     help="The paper changes every year, so raw % mixes "
                          "learning with paper difficulty. This view shows "
                          "each unit's standing among all units in the SAME "
@@ -2340,11 +2452,29 @@ with tabs[2]:
             t = t[t["_n"] >= MIN_N]
             t["_y"] = _yval(t["_m"]).round(1)
             if _pctile and (sdim or cohort_mode):
-                # rank among same-year (same-paper) peers -> 0-100 percentile
+                # rank among same-year (same-paper) peers -> 0-100 percentile.
+                # BALANCED PANEL: contest coverage changed (2022-23 included
+                # coastal districts that later years didn't) — ranking only
+                # units present in EVERY period keeps the peer set constant,
+                # so percentile movement is real movement, not roster churn.
+                _dropped_units = 0
+                if sdim:
+                    _nper = t.groupby(sdim)[xdim].nunique()
+                    _full = set(_nper[_nper == t[xdim].nunique()].index)
+                    _dropped_units = int((~t[sdim].isin(_full)).sum() > 0)                         and int(_nper.size - len(_full))
+                    if len(_full) >= 5:
+                        t = t[t[sdim].isin(_full)]
                 t["_y"] = (t.groupby(xdim)["_m"].rank(pct=True) * 100).round(1)
                 _ylab = (f"percentile among "
                          f"{'cohorts' if cohort_mode else level + 's'} "
                          "(same-year peers)")
+                if sdim and _dropped_units:
+                    st.caption(f"🏁 Percentiles ranked among the "
+                               f"{t[sdim].nunique()} {level}s covered in "
+                               f"**every** period ({_dropped_units} with "
+                               "partial coverage excluded) — constant peer "
+                               "set, so movement is real, not roster "
+                               "change.")
                 if cohort_mode:
                     st.caption("🏁 Cohort lines shown as **percentile among "
                                "cohorts sitting the same paper** — the only "
@@ -2388,12 +2518,15 @@ with tabs[2]:
                            f"{_last:.1f}")
                 kk3.metric("Change over the period (pts)", f"{_last - _first:+.1f}",
                            delta=f"{_last - _first:+.1f}")
-                st.caption("⚠️ **A different paper is set every year** — "
-                           "year-to-year changes mix real learning with "
-                           "paper difficulty. Within-year comparisons "
-                           "(district vs district, gender, equity) are "
-                           "exact; cross-year lines are best read as "
-                           "relative movement.")
+                st.caption("⚠️ **A different paper is set every year**, "
+                           "and coverage changed too (2022-23 additionally "
+                           "included coastal districts; later years "
+                           "didn't) — so raw year-to-year averages mix "
+                           "learning with paper difficulty AND who was "
+                           "tested. Within-year comparisons are exact; for "
+                           "cross-year movement use the 🏁 percentile "
+                           "view, which ranks a constant peer set on the "
+                           "same paper.")
 
             # ---- line chart -------------------------------------------------
             def _series_pts(name):
@@ -3328,6 +3461,11 @@ with tabs[4]:
                 _cov = competency_coverage_note(RQMAPS)
                 if _cov:
                     st.caption(_cov)
+                if _hm.dropna(how="all").empty:
+                    st.info("Competency view unavailable for the current "
+                            "selection — falling back to items.")
+                    _hm = (_md.groupby(_grade_c)[_qm].mean().mul(100)
+                           .round(0))
             else:
                 _hm = (_md.groupby(_grade_c)[_qm].mean().mul(100).round(0))
                 if _hm_mode == "Competency" and QMAP:
