@@ -193,7 +193,7 @@ def competency_block_bars(rep):
     return fig
 
 
-def playbook_grid(agg, district, year=None):
+def playbook_grid(agg, district, year=None, min_n=30):
     """
     Layer 8 mechanism: the decision table itself, with real blocks placed in it.
     Every cell shows how many block x competency pairs landed there.
@@ -205,17 +205,32 @@ def playbook_grid(agg, district, year=None):
         year = d["year"].max()
     d = d[d["year"] == year]
 
+    # Classify EXACTLY as playbook.recommend() does, or the grid and the
+    # recommendations disagree: an unweighted mean with no size floor counted
+    # 48 cells for Bagalkot while the engine — correctly — issued none of them.
+    # Same weighted mean, same evidence-gated bands, same min_n.
+    def _w(s, col="below_pct"):
+        wt = pd.to_numeric(s["n"], errors="coerce").fillna(0.0)
+        v = pd.to_numeric(s[col], errors="coerce")
+        ok = v.notna() & (wt > 0)
+        return float((v[ok] * wt[ok]).sum() / wt[ok].sum()) if ok.any() else float("nan")
+
     g = (d.groupby(["block", "competency"])
-           .agg(below_pct=("below_pct", "mean"), prev_pct=("prev_pct", "mean"))
-           .reset_index())
+           .apply(lambda s: pd.Series({"below_pct": _w(s),
+                                       "prev_pct": _w(s, "prev_pct"),
+                                       "n": s["n"].sum()}),
+                  include_groups=False)
+           .reset_index().dropna(subset=["below_pct"]))
+    skipped = int((g["n"] < min_n).sum())
+    g = g[g["n"] >= min_n]
 
     sev_order = ["Critical", "At-risk", "Strong"]
     traj_order = ["Declining", "Stagnant", "Improving"]
     counts = {(s, t): 0 for s in sev_order for t in traj_order}
 
     for r in g.itertuples():
-        s = pb.severity(r.below_pct)
-        t = pb.trajectory(r.below_pct, r.prev_pct)
+        s = pb.severity(r.below_pct, r.n)
+        t = pb.trajectory(r.below_pct, r.prev_pct, r.n)
         if (s, t) in counts:
             counts[(s, t)] += 1
 
@@ -236,9 +251,16 @@ def playbook_grid(agg, district, year=None):
         colorscale="Reds", showscale=False,
         xgap=3, ygap=3,
     ))
+    _sub = (f"<br><sup>{int(g['n'].sum()):,} students across {len(g)} "
+            f"block×competency pairs"
+            + (f" · {skipped} pair(s) below the {min_n}-student minimum are "
+               f"excluded, exactly as the engine excludes them" if skipped
+               else "")
+            + "</sup>")
     fig.update_layout(
-        title=f"Layer 8 — the decision table, with {district}'s blocks placed in it",
-        height=320, margin=dict(l=10, r=10, t=60, b=10),
+        title=f"Layer 8 — the decision table, with {district}'s blocks "
+              f"placed in it{_sub}",
+        height=340, margin=dict(l=10, r=10, t=76, b=10),
         yaxis=dict(autorange="reversed"),
     )
     return fig

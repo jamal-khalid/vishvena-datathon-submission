@@ -151,6 +151,15 @@ def train_early_warning(agg, min_n=30, risk_cut=50.0):
     precision = tp / max(int(flagged.sum()), 1)
     recall = tp / max(int(real_bad.sum()), 1)
 
+    # The SAME early-warning question asked of the naive rule: "flag whatever is
+    # already above the line." When the model loses on MAE this is the better
+    # predictor, so it needs its own precision/recall to be offered in place of
+    # the model rather than as an apology for it.
+    n_flag = test["below_pct"].values >= risk_cut
+    n_tp = int((real_bad & n_flag).sum())
+    naive_precision = n_tp / max(int(n_flag.sum()), 1)
+    naive_recall = n_tp / max(int(real_bad.sum()), 1)
+
     # forecast for the year after the last observed one
     latest = m[m["year"] == m["year"].max()].copy()
     live = _early_warning_frame(agg, min_n)          # rows that have a next year
@@ -178,12 +187,26 @@ def train_early_warning(agg, min_n=30, risk_cut=50.0):
         "improvement_pct": round(100 * (naive - mae) / naive, 1) if naive else 0.0,
         "r2": round(r2, 3),
         "precision": round(precision, 3), "recall": round(recall, 3),
+        "naive_precision": round(naive_precision, 3),
+        "naive_recall": round(naive_recall, 3),
         "n_flagged": int(flagged.sum()), "n_real_bad": int(real_bad.sum()),
+        "risk_cut": float(risk_cut),
         "coefficients": dict(zip(EW_FEATURES, model.coef_.round(3))),
         "forecast": fc_src[["district", "block", "grade", "competency", "n",
                             "below_pct", "predicted_next", "change"]]
                       .sort_values("predicted_next", ascending=False)
                       .reset_index(drop=True),
+        # What to show when the model loses to persistence: the units already
+        # above the risk line, which IS the better predictor here. Same rows,
+        # ranked by something we can defend.
+        "naive_watchlist": fc_src[["district", "block", "grade", "competency",
+                                   "n", "below_pct"]]
+                             .rename(columns={"below_pct":
+                                              f"below_pct_{int(last_obs)}"})
+                             .sort_values(f"below_pct_{int(last_obs)}",
+                                          ascending=False)
+                             .reset_index(drop=True),
+        "last_observed_year": int(last_obs),
     }
 
 
