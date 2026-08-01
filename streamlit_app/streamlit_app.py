@@ -36,6 +36,7 @@ import competency as L_competency
 import models_ml as L_models
 import charts as L_charts
 import secondary as L_secondary          # <-- ADDED: cross-dataset layer
+import insights_cross as L_cross         # <-- ADDED: cross-dataset insights
 from stats_tests import proportion_test
 import verbalize as L_verbalize
 
@@ -1107,12 +1108,15 @@ if hierarchy:
         k4.metric(f"Weakest {hierarchy[-1]}", grp.idxmin(), f"{grp.min():.1f}",
                   delta_color="inverse")
 
+# Cross-dataset sits BEFORE Insights on purpose: the district-context join is
+# an input to the final insights, not an afterthought, and the reading order
+# should match the analysis order.
 tabs = st.tabs(["🌞 Hierarchy", "📈 Trends", "⚖️ Gender Gap", "🎯 Competencies",
                 "🔬 Deep Dive", "🚨 Rankings & Alerts", "🔮 Prediction",
                 "🗂️ Data", "🧩 Item Analysis", "🗺️ Map",
-                "📄 Facts & Health", "🧠 Insights", "📋 Action Plan", "📝 Briefs",
-                "🎓 Competency Report", "🎛️ What-If", "🧬 Archetypes & Risk",
-                "🔗 Cross-dataset"])          # <-- ADDED: tabs[17]
+                "📄 Facts & Health", "🔗 Cross-dataset", "🧠 Insights",
+                "📋 Action Plan", "📝 Briefs", "🎓 Competency Report",
+                "🎛️ What-If", "🧬 Archetypes & Risk"])
 
 # ---------------------------------------------------------------------------
 #  Analysis layers — shared aggregate, built once from the current selection
@@ -1187,13 +1191,67 @@ def _c_train_early_warning(_agg, agg_sig):
 def _c_cluster_blocks(_agg, agg_sig, k=3):
     return L_models.cluster_blocks(_agg, k=k)
 
+# `context` is the cross-dataset bundle from insights_cross.prepare(). It is
+# built from AGG plus the district file, so agg_sig + ctx_sig together key the
+# cache — NOT the bundle itself, which holds DataFrames and is unhashable.
 @st.cache_data(show_spinner=False)
-def _c_insights_generate(_agg, agg_sig, district, limit=8):
-    return L_insights.generate(_agg, district, limit=limit)
+def _c_insights_generate(_agg, agg_sig, district, limit=8, min_n=30,
+                         _context=None, ctx_sig=None):
+    return L_insights.generate(_agg, district, limit=limit, min_n=min_n,
+                               context=_context)
 
 @st.cache_data(show_spinner=False)
-def _c_insights_describe(_agg, agg_sig, district):
-    return L_insights.describe(_agg, district)
+def _c_insights_describe(_agg, agg_sig, district, min_n=30):
+    return L_insights.describe(_agg, district, min_n=min_n)
+
+@st.cache_data(show_spinner=False)
+def _c_cross_prepare(_agg, agg_sig, _sec, sec_sig, level):
+    return L_cross.prepare(_agg, _sec, level=level)
+
+
+@st.cache_data(show_spinner=False)
+def _c_read_context_file(path, mtime):
+    return pd.read_excel(path)
+
+
+def _find_context_file():
+    """The district-context workbook shipped next to the app, if present."""
+    for cand in ("secondary_dataset.xlsx", "secondary.xlsx"):
+        p = os.path.join(_HERE, cand)
+        if os.path.exists(p):
+            return p, cand
+    return None, None
+
+
+def _insight_context(level=None):
+    """
+    The cross-dataset bundle, shared by the Insights and Action Plan tabs.
+
+    One loader so the two tabs can never disagree about what the district
+    context says. Returns None when there is no context file or the district
+    names cannot be matched — callers then fall back to primary-only output.
+    """
+    path, name = _find_context_file()
+    if path is None or "AGG" not in globals() or AGG is None:
+        return None
+    lvl = level or st.session_state.get("ins_level") or "District"
+    try:
+        sec = _c_read_context_file(path, os.path.getmtime(path))
+        return _c_cross_prepare(AGG, AGG_SIG, sec, f"{name}:{sec.shape}", lvl)
+    except Exception:
+        return None
+
+@st.cache_data(show_spinner=False)
+def _c_playbook_recommend_v3(_agg, agg_sig, district, limit=12, min_n=30,
+                             _context=None, ctx_sig=None):
+    return L_playbook.recommend(_agg, district, limit=limit, min_n=min_n,
+                                context=_context)
+
+@st.cache_data(show_spinner=False)
+def _c_playbook_coverage_v3(_agg, agg_sig, district, min_n=30,
+                            _context=None, ctx_sig=None):
+    return L_playbook.coverage_stats(_agg, district, min_n=min_n,
+                                     context=_context)
 
 @st.cache_data(show_spinner=False)
 def _c_playbook_recommend(_agg, agg_sig, district, limit=12):
@@ -1228,12 +1286,16 @@ def _c_verbalize_district(_agg, agg_sig, district):
     return L_verbalize.verbalize_district(_agg, district)
 
 @st.cache_data(show_spinner=False)
-def _c_brief_build(_agg, agg_sig, district, role, block):
-    return L_brief.build(_agg, district, role=role, block=block)
+def _c_brief_build(_agg, agg_sig, district, role, block, min_n=30,
+                   _context=None, ctx_sig=None):
+    return L_brief.build(_agg, district, role=role, block=block, min_n=min_n,
+                         context=_context)
 
 @st.cache_data(show_spinner=False)
-def _c_brief_build_all(_agg, agg_sig, district, block):
-    return L_brief.build_all(_agg, district, block=block)
+def _c_brief_build_all(_agg, agg_sig, district, block, min_n=30,
+                       _context=None, ctx_sig=None):
+    return L_brief.build_all(_agg, district, block=block, min_n=min_n,
+                             context=_context)
 
 
 
@@ -3868,7 +3930,8 @@ with tabs[10]:
 
             # ---- brief clause traceability -------------------------------------
             with st.expander("How the district brief's clauses are computed"):
-                st.dataframe(pd.DataFrame(L_brief.build_breakdown(AGG, d_f)),
+                st.dataframe(pd.DataFrame(L_brief.build_breakdown(
+                    AGG, d_f, min_n=MINN, context=_insight_context())),
                              use_container_width=True, hide_index=True)
     _tab10_fragment()
 
@@ -3876,25 +3939,85 @@ with tabs[10]:
 # ============================================================================
 #  Tab 11 — Insights   (ranked findings from the generator suite)
 # ============================================================================
-with tabs[11]:
+with tabs[12]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab11_fragment():
         st.subheader("🧠 Ranked Insights")
         if not _needs_agg():
 
+            # ---- what the assessment file says, plus what district context
+            # adds. Both families score in the same unit (points of the
+            # outcome), so they rank against each other in one list.
+            ic1, ic2 = st.columns([1, 1])
             d_ins = _pick_district("ins_dist")
-            items = _c_insights_generate(AGG, AGG_SIG, d_ins, limit=8)
+            _lvl = ic1.radio(
+                "Analyse district context at", list(L_cross.LEVELS),
+                horizontal=True, key="ins_level",
+                help="Districts rolled up into the group they belong to in "
+                     "your data. Counts are summed, rates size-weighted. "
+                     "Fewer units measure each one more precisely but leave "
+                     "too few points to correlate — the tab says so when that "
+                     "happens rather than reporting a number nobody should "
+                     "read.")
+
+            # the district-context file, via the shared loader
+            _sec_path, _sec_name = _find_context_file()
+            _ctx = _insight_context(_lvl)
+            if _ctx:
+                _u, _lv = _ctx["n_units"], _ctx["level"].lower()
+                ic2.metric(f"{_ctx['level']}s in the analysis", _u,
+                           help=f"smallest detectable |r| here: "
+                                f"{_ctx['min_detectable_r']:.2f}")
+                if _ctx.get("descriptive_only"):
+                    ic2.caption(f"⚠️ {_u} {_lv}s — too few to correlate, so "
+                                f"comparisons only.")
+            elif _sec_path is None:
+                ic2.caption("No district-context file found next to the app — "
+                            "primary insights only.")
+            else:
+                ic2.caption("District names could not be matched to the "
+                            "context file — primary insights only.")
+
+            items = _c_insights_generate(
+                AGG, AGG_SIG, d_ins, limit=8, min_n=MINN, _context=_ctx,
+                ctx_sig=(f"{_lvl}:{_ctx['n_units']}" if _ctx else "none"))
             if not items:
-                st.info("No findings passed the significance and magnitude thresholds "
-                        "for this selection.")
+                st.info(f"No findings passed the {MINN}-student minimum and "
+                        f"the evidence threshold for this selection. Lower "
+                        f"'Min students per group' in the sidebar to see "
+                        f"weaker signals — they will be less reliable.")
             for i, it in enumerate(items, 1):
-                st.markdown(f"**{i}. `{it['category']}`** — {it['text']}")
-                st.caption(f"↳ {it['evidence']}")
+                _tag = ("🔗" if str(it.get("source", "")).startswith("x_")
+                        else "📊")
+                st.markdown(f"**{i}. {_tag} `{it['category']}`** — {it['text']}")
+                st.caption(f"↳ {it['evidence']}"
+                           + (f"  ·  `{it['source']}`" if it.get("source")
+                              else ""))
+            if items:
+                st.caption("📊 = from the assessment file · 🔗 = from the "
+                           "district-context join. Ranked by evidence — the "
+                           "lower bound of the effect, so a big number from a "
+                           "tiny group cannot outrank a solid one.")
 
             with st.expander("Generator coverage"):
-                reg = pd.DataFrame(_c_insights_describe(AGG, AGG_SIG, d_ins))
+                reg = pd.DataFrame(_c_insights_describe(AGG, AGG_SIG, d_ins,
+                                                        min_n=MINN))
+                if _ctx:
+                    reg = pd.concat(
+                        [reg, pd.DataFrame(L_cross.describe(_ctx, d_ins))],
+                        ignore_index=True)
                 st.dataframe(reg, use_container_width=True, hide_index=True)
+                _errs = L_insights.ERRORS + L_cross.ERRORS
+                if _errs:
+                    st.error(f"⚠️ {len(_errs)} generator(s) raised: "
+                             + "; ".join(f"{e['generator']}: {e['error']}"
+                                         for e in _errs[:3]))
+                if _ctx and _ctx.get("rollup_rules"):
+                    st.caption("How the context file was rolled up: "
+                               + " · ".join(f"**{k}** {v}" for k, v in
+                                            list(_ctx["rollup_rules"].items())[:6])
+                               + " …")
 
             f = L_charts.insight_scores(items)
             if f:
@@ -3905,25 +4028,45 @@ with tabs[11]:
 # ============================================================================
 #  Tab 12 — Action Plan   (composed intervention recommendations)
 # ============================================================================
-with tabs[12]:
+with tabs[13]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab12_fragment():
         st.subheader("📋 Action Plan")
         if not _needs_agg():
             d_act = _pick_district("act_dist")
-            cov = _c_playbook_coverage(AGG, AGG_SIG, d_act)
+            # the same district-context bundle the Insights tab uses, so an
+            # action can say "…but this district already beats its
+            # circumstances, so the fix is local"
+            _actx = _insight_context()
+            _asig = (f"{_actx['level']}:{_actx['n_units']}" if _actx else "none")
+            cov = _c_playbook_coverage_v3(AGG, AGG_SIG, d_act, min_n=MINN,
+                                          _context=_actx, ctx_sig=_asig)
             if cov:
-                k = st.columns(4)
+                k = st.columns(5)
                 k[0].metric("Recommendations", cov["recommendations_generated"])
                 k[1].metric("Unique rule combos", cov["unique_rule_combinations"])
-                k[2].metric("Possible combinations", f"{cov['theoretical_combinations']:,}")
+                k[2].metric("Possible combinations",
+                            f"{cov['distinct_outputs']:,}",
+                            help=f"{cov['base_actions']} base actions × "
+                                 f"{cov['clause_subsets']} clause combinations "
+                                 f"(up to {cov['max_clauses_shown']} shown at "
+                                 f"once). Computed from the rules, not "
+                                 f"hardcoded.")
                 k[3].metric("With a peer model", cov["with_peer_model"])
+                k[4].metric("Using district context",
+                            cov.get("using_district_context", 0),
+                            help="Actions whose advice changed because of the "
+                                 "cross-dataset join.")
 
-            recs = _c_playbook_recommend(AGG, AGG_SIG, d_act, limit=12)
+            recs = _c_playbook_recommend_v3(AGG, AGG_SIG, d_act, limit=12,
+                                            min_n=MINN, _context=_actx,
+                                            ctx_sig=_asig)
             if not recs:
-                st.success("No block-competency pairing met the criteria for "
-                           "intervention in this selection.")
+                st.success(f"No block-competency pairing met the criteria for "
+                           f"intervention in this selection — every group is "
+                           f"either performing adequately or below the "
+                           f"{MINN}-student minimum needed to act on.")
             for r in recs:
                 with st.container(border=True):
                     head = f"**{r['priority']}** · {r['block']} — {r['competency']}"
@@ -3935,14 +4078,15 @@ with tabs[12]:
                                + (f"  ·  also applies: {r['also_applies']}"
                                   if r["also_applies"] else ""))
 
-            st.plotly_chart(L_charts.playbook_grid(AGG, d_act), use_container_width=True)
+            st.plotly_chart(L_charts.playbook_grid(AGG, d_act, min_n=MINN),
+                            use_container_width=True)
     _tab12_fragment()
 
 
 # ============================================================================
 #  Tab 13 — Briefs   (role-based narrative)
 # ============================================================================
-with tabs[13]:
+with tabs[14]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab13_fragment():
@@ -3959,7 +4103,12 @@ with tabs[13]:
             with c2:
                 blk = st.selectbox("Block (for the block brief)", blocks, key="br_blk")
 
-            b = _c_brief_build(AGG, AGG_SIG, d_br, role, blk)
+            # same district-context bundle the Insights and Action Plan tabs
+            # use, so a brief cannot contradict either of them
+            _bctx = _insight_context()
+            _bsig = (f"{_bctx['level']}:{_bctx['n_units']}" if _bctx else "none")
+            b = _c_brief_build(AGG, AGG_SIG, d_br, role, blk, min_n=MINN,
+                               _context=_bctx, ctx_sig=_bsig)
             if b:
                 meta = L_brief.ROLES[role]
                 st.caption(f"**Scope:** {b['scope']}  ·  **Sees:** {meta['scope']}  ·  "
@@ -3981,7 +4130,7 @@ with tabs[13]:
 # ============================================================================
 #  Tab 14 — Competency Report   (per-competency deep dive)
 # ============================================================================
-with tabs[14]:
+with tabs[15]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab14_fragment():
@@ -4068,7 +4217,7 @@ with tabs[14]:
 # ============================================================================
 #  Tab 14 — What-If scenario planner
 # ============================================================================
-with tabs[15]:
+with tabs[16]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab15_fragment():
@@ -4161,7 +4310,7 @@ with tabs[15]:
 # ============================================================================
 #  Tab 15 — Learning archetypes (KMeans) + risk model
 # ============================================================================
-with tabs[16]:
+with tabs[17]:
     # fragment: widgets inside this tab rerun only this tab
     @st.fragment
     def _tab16_fragment():
@@ -4204,9 +4353,16 @@ with tabs[16]:
                 if not ew["beats_naive"]:
                     st.error(
                         "🚫 **This model does not beat simply assuming nothing changes.** "
-                        "Do not present it as a forecast — report the naive baseline "
-                        "instead and say the data does not support prediction at this "
-                        "granularity.")
+                        f"Its error is {ew['mae']} points against the naive baseline's "
+                        f"{ew['naive_mae']} — so year-to-year movement at this "
+                        "granularity is mostly noise, and no forecast is offered below. "
+                        "The watchlist instead uses the naive rule, which is the better "
+                        "predictor here.")
+                    st.caption(
+                        f"R² is {ew['r2']}, which looks strong and is misleading: a unit "
+                        f"at 60% this year is near 60% next year, so simply copying last "
+                        f"year's number already earns a high R². Error against the naive "
+                        f"baseline is the test that matters, and this model fails it.")
                 else:
                     st.success(
                         f"✅ On a held-out year the model is **{ew['improvement_pct']}% more "
@@ -4214,9 +4370,36 @@ with tabs[16]:
                         f"{ew['recall']*100:.0f}% of the units that actually ended up "
                         f"below the risk line (precision {ew['precision']*100:.0f}%).")
 
-                st.markdown(f"**Forecast for {ew['forecast_year']} — highest predicted risk**")
-                st.dataframe(ew["forecast"].head(15), use_container_width=True,
-                             hide_index=True)
+                # Never print a forecast under a banner telling the reader not to
+                # trust one. When the model loses to persistence, show what the
+                # naive rule flags — same rows, ranked by something defensible.
+                if ew["beats_naive"]:
+                    st.markdown(f"**Forecast for {ew['forecast_year']} — "
+                                f"highest predicted risk**")
+                    st.dataframe(ew["forecast"].head(15),
+                                 use_container_width=True, hide_index=True)
+                else:
+                    _cut = ew.get("risk_cut", 50.0)
+                    st.markdown(f"**Watchlist for {ew['forecast_year']} — "
+                                f"units already above {_cut:.0f}% below grade level "
+                                f"in {ew.get('last_observed_year', '')}**")
+                    st.dataframe(ew["naive_watchlist"].head(15),
+                                 use_container_width=True, hide_index=True)
+                    st.caption(
+                        f"Not a prediction — these are the units that are already "
+                        f"struggling, on the assumption that nothing changes. On the "
+                        f"held-out year that rule caught "
+                        f"{ew.get('naive_recall', 0)*100:.0f}% of the units that did end "
+                        f"up at risk (precision "
+                        f"{ew.get('naive_precision', 0)*100:.0f}%), against the model's "
+                        f"{ew['recall']*100:.0f}% / {ew['precision']*100:.0f}%. Acting on "
+                        f"today's worst units is the defensible move when next year "
+                        f"cannot be predicted.")
+                    with st.expander("Model output anyway (not usable as a forecast)"):
+                        st.dataframe(ew["forecast"].head(15),
+                                     use_container_width=True, hide_index=True)
+                        st.caption("Shown for transparency only — it failed the "
+                                   "baseline test above.")
 
                 with st.expander("What the model learned"):
                     st.dataframe(pd.DataFrame(
@@ -4241,7 +4424,7 @@ with tabs[16]:
 #  uploaded district-level file, calls secondary.py, renders. It does not
 #  modify anything above this line.
 # ============================================================================
-with tabs[17]:
+with tabs[11]:
     @st.fragment
     def _tab17_fragment():
         st.subheader("🔗 Cross-dataset — does district context explain results?")
