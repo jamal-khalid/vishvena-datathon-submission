@@ -644,7 +644,8 @@ def secondary_context(_df, sig):
     full, _ = district_year_standing(_df, sig)
     perf = full.mean(axis=1).rename("Assessment accuracy (%)")
     m = sec.join(perf, how="inner").dropna(subset=["Assessment accuracy (%)"])
-    return m if len(m) >= 8 else None
+    m = m.rename_axis("District")     # some pandas versions drop the index
+    return m if len(m) >= 8 else None # name on join → hover_name breaks
 
 
 def pearson(x, y):
@@ -1031,7 +1032,7 @@ def render_nipun():
                 continue
             r, n = pearson(m[col], m["Assessment accuracy (%)"])
             with box:
-                fig = px.scatter(m.reset_index(), x=col,
+                fig = px.scatter(m.rename_axis("District").reset_index(), x=col,
                                  y="Assessment accuracy (%)",
                                  hover_name="District", height=320,
                                  trendline=None,
