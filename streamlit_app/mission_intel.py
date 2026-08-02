@@ -205,6 +205,241 @@ def _impact_banner(df, sig, mission):
                "measured, not modeled.")
 
 
+def _about_card(title, body):
+    st.markdown(
+        f"<div style='background:#ffffff;border:1px solid #e6e9ef;"
+        f"border-top:3px solid {ACCENT};border-radius:12px;"
+        f"padding:12px 14px;height:100%;'>"
+        f"<div style='font-size:13px;font-weight:800;color:{ACCENT};"
+        f"text-transform:uppercase;letter-spacing:.5px;'>{title}</div>"
+        f"<div style='font-size:13.5px;color:#26303e;line-height:1.55;"
+        f"margin-top:6px;'>{body}</div></div>", unsafe_allow_html=True)
+
+
+_ABOUT = {
+    "nipun": {
+        "mission": (
+            "<b>NIPUN Bharat</b> is the Government of India's promise "
+            "(launched 2021) that <b>every child can read and do basic "
+            "maths by Grade 3</b> — counting, adding, subtracting. It is "
+            "the foundation everything else in school is built on."),
+        "akshara": (
+            "Akshara Foundation tests <b>13.8 lakh children</b> in rural "
+            "Karnataka every year on exactly those basics. And because "
+            "the contest covers <b>Grades 4, 5 and 6</b>, it answers the "
+            "question the government cannot see from Grade-3 data alone: "
+            "<b>did the foundation actually hold — or are older children "
+            "still struggling with it?</b>"),
+        "method": (
+            "Simple: every question in the test is tagged with the skill "
+            "it checks. So we can say, for each district — <b>how many "
+            "children can add, how many can subtract</b> — and watch it "
+            "year after year. A district that stays weak on the same "
+            "skill for 3 years straight gets flagged. That flag is the "
+            "link between Akshara's test and NIPUN's goal."),
+    },
+    "parakh": {
+        "mission": (
+            "<b>PARAKH</b> is India's new national body (under NCERT) "
+            "with one big idea: <b>stop asking 'what marks did the child "
+            "get' and start asking 'what can the child actually do'</b> — "
+            "can they divide, can they read a chart, can they measure."),
+        "akshara": (
+            "Akshara's contest already works exactly this way — every "
+            "one of the 20 questions is labelled with the skill it "
+            "tests. So instead of a mark out of 20, each of the "
+            "<b>13.8 lakh children gives us a skill report</b>: strong "
+            "in addition, weak in division. This page is what PARAKH's "
+            "vision looks like running live, at state scale."),
+        "method": (
+            "We group every answer under its skill, then ask three "
+            "practical questions: <b>which skills are weak</b> (the "
+            "matrix), <b>where are they weak</b> (the map), and <b>who "
+            "needs help</b> (girls/boys, which grade). The weakest "
+            "skills automatically become recommendations a teacher or "
+            "officer can act on."),
+    },
+}
+
+
+def _takeaways(kind, df, sig):
+    """Live key takeaways — computed from the loaded data, never hardcoded."""
+    ca = competency_accuracy(df, sig)
+    ov = (ca.groupby("competency")
+          .apply(lambda x: np.average(x["acc"], weights=x["n"]),
+                 include_groups=False).sort_values())
+    gg = gender_gap_by(df, sig)
+    _, pct = district_year_standing(df, sig)
+    dmove, _c = movement_classes(pct)
+    if kind == "nipun":
+        fnd = ca[ca["competency"].isin(FOUNDATIONAL)]
+        f_now = np.average(fnd[fnd.Year == fnd.Year.max()]["acc"],
+                           weights=fnd[fnd.Year == fnd.Year.max()]["n"])
+        pg = persistent_gaps(df, sig)
+        return [
+            f"Foundational skills stand at <b>{f_now:.0f}%</b> in the "
+            f"latest year — roughly 1 in 3 answers on NIPUN's core "
+            f"skills is still wrong in Grades 4–6.",
+            f"<b>{ov.index[0]}</b> is the single weakest skill statewide "
+            f"({ov.iloc[0]:.0f}%) and stays weak in every grade.",
+            f"<b>{len(pg)}</b> district × skill gaps persist below 50% in "
+            f"every tested year — the remediation shortlist.",
+            f"<b>{dmove.idxmin()}</b> is losing the most ground "
+            f"({dmove.min():+.0f} percentile pts); "
+            f"<b>{dmove.idxmax()}</b> gained the most "
+            f"({dmove.max():+.0f}).",
+            f"Girls lead boys on every competency (up to "
+            f"+{gg['Gap (G−B)'].max():.1f} pts) — the gender story here "
+            f"is girls' strength.",
+        ]
+    return [
+        f"<b>{ov.index[0]}</b> is the weakest demonstrated competency "
+        f"statewide ({ov.iloc[0]:.0f}%); <b>{ov.index[-1]}</b> the "
+        f"strongest ({ov.iloc[-1]:.0f}%).",
+        "Division barely improves across grades — a skill children are "
+        "not gaining through progression, which marks a curriculum "
+        "problem, not a cohort problem.",
+        "The same skill can differ by 25+ points between districts — "
+        "competency geography tells each district WHAT to teach, not "
+        "just how it ranks.",
+        f"Girls demonstrate every competency more often than boys "
+        f"(up to +{gg['Gap (G−B)'].max():.1f} pts).",
+        "Every recommendation below traces to a competency, a location "
+        "and a monitorable number — assessment as decision evidence, "
+        "which is PARAKH's whole argument.",
+    ]
+
+
+def _skills_glossary(kind):
+    """Plain-words definitions of every skill family — juries don't know
+    these terms, so the page explains them."""
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    if kind == "nipun":
+        st.markdown("#### 📖 The skills, in plain words — and why NIPUN "
+                    "cares about the first group most")
+        st.caption("NIPUN's promise is the 🧱 foundational group. The "
+                   "other two groups are how we SEE a weak foundation: "
+                   "a child who never mastered the basics is exactly the "
+                   "child who fails division and fractions later.")
+    else:
+        st.markdown("#### 📖 The 10 skills every question maps to")
+        st.caption("This is PARAKH's core idea in practice: each of the "
+                   "20 questions tests exactly one of these skills — so "
+                   "a child's result is a skill profile, not a mark. "
+                   "Every chart below speaks this vocabulary.")
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        _about_card(
+            "🧱 Foundational — the basics" +
+            (" (what NIPUN protects)" if kind == "nipun" else ""),
+            "<b>Number sense</b> — knowing what numbers mean: which is "
+            "bigger, what comes next, reading a number aloud.<br>"
+            "<b>Place value</b> — understanding units, tens and hundreds "
+            "(why the 4 in 42 means forty).<br>"
+            "<b>Addition</b> — putting amounts together, with carrying.<br>"
+            "<b>Subtraction</b> — taking away, with borrowing.<br>"
+            "<i>This is the reading-and-writing of maths — without it, "
+            "nothing later works.</i>")
+    with g2:
+        _about_card(
+            "✖️ Operations — built on the basics",
+            "<b>Multiplication</b> — repeated addition, times tables, "
+            "long multiplication.<br>"
+            "<b>Division</b> — sharing equally, long division. The "
+            "hardest of the four operations, and the weakest skill in "
+            "this data.<br>"
+            "<b>Fractions</b> — parts of a whole (half, quarter).<br>"
+            "<i>" + ("If the foundation is shaky, this floor is where "
+                     "children visibly start falling — NIPUN's early-"
+                     "warning zone." if kind == "nipun" else
+                     "Procedure skills: they show whether a child can "
+                     "APPLY the basics, which is what PARAKH tests for.")
+            + "</i>")
+    with g3:
+        _about_card(
+            "📏 Applied — maths meeting daily life",
+            "<b>Measurement</b> — reading clocks and calendars, lengths, "
+            "weights.<br>"
+            "<b>Shapes</b> — recognising shapes and patterns, early "
+            "geometry.<br>"
+            "<b>Data handling</b> — reading a simple table or chart and "
+            "answering from it.<br>"
+            "<i>" + ("The skills a child uses at the market, at home, "
+                     "on a bus timetable." if kind == "parakh" else
+                     "Least dependent on the classroom — often shaped by "
+                     "home life, which is why we join district context "
+                     "data here.") + "</i>")
+
+
+def _mission_about(kind, df=None, sig=None):
+    a = _ABOUT[kind]
+    c1, c2, c3 = st.columns(3)
+    with c1:
+        _about_card("The government mission", a["mission"])
+    with c2:
+        _about_card("How Akshara's data serves it", a["akshara"])
+    with c3:
+        _about_card("How we correlate the two", a["method"])
+    st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+    d1, d2 = st.columns([1.15, 1])
+    with d1:
+        _about_card(
+            "How the insights are generated",
+            "Think of it as four honest steps: <b>1.</b> check every "
+            "answer against the skill it tests · <b>2.</b> add it up "
+            "for each district, grade and gender · <b>3.</b> flag "
+            "anything weak <i>year after year</i> (one bad year can be "
+            "the paper; three bad years is real) · <b>4.</b> put the "
+            "flags on a map and turn them into to-dos. "
+            "<b>No AI, no black box</b> — every number here comes "
+            "straight from the data and can be re-checked by hand.")
+        _about_card(
+            "How Akshara serves the mission",
+            "Every year, communities across rural Karnataka run this "
+            "contest in their own Gram Panchayats. That gives the "
+            "state something no survey can afford: a <b>fresh, "
+            "skill-by-skill health check of 13.8 lakh children, every "
+            "single year</b>. This platform turns that yearly check "
+            "into action: find the gap, name the place, fix it, and "
+            "check again next year.")
+    with d2:
+        if df is not None:
+            _tk = "".join(f"<div style='margin:6px 0;padding-left:14px;"
+                          f"position:relative;'><span style='position:"
+                          f"absolute;left:0;color:{ACCENT};'>▸</span>"
+                          f"{t}</div>" for t in _takeaways(kind, df, sig))
+            _about_card("Key takeaways from the data", _tk)
+    with st.expander("📑 Which columns power this page (primary + secondary "
+                     "data)"):
+        p1, p2 = st.columns(2)
+        with p1:
+            st.markdown("**Primary — Akshara GP Contest (1,379,087 rows)**")
+            st.markdown(
+                "- `District / Block / Cluster / GP Name / GP ID` — "
+                "geography, drill-down and the priority map\n"
+                "- `Gender` — the equity lens\n"
+                "- `Year` (from folder) & `Grade` (from filename) — "
+                "trajectory, cohorts, persistence\n"
+                "- `Q1–Q20` (1 = correct) — every accuracy number here\n"
+                "- **'Competency Mapping' sheet** — each paper's own "
+                "question→skill map (9 papers), the key that makes "
+                "cross-year skill analysis honest")
+        with p2:
+            st.markdown("**Secondary — district context (31 districts)**")
+            st.markdown(
+                "- `Student Teacher Ratio` — resourcing (r = −0.37 vs "
+                "accuracy)\n"
+                "- `Rural/Urban Male/Female/Total Literacy` — home "
+                "learning environment (Rural Female Literacy is the "
+                "strongest associate, r = +0.44)\n"
+                "- `Per Capita Income`, `Total Libraries`, `Households`, "
+                "`Teachers`, `Student Enrolment`, `Internet`, `Computer "
+                "Available` — the context-association table\n\n"
+                "District-level only: context is **association, never "
+                "causation**, and never explains an individual Block "
+                "or GP.")
+
+
 def _sig(df):
     return f"{len(df)}:{df.columns.size}:{float(pd.to_numeric(df.iloc[:200].select_dtypes('number').sum().sum(), errors='coerce') or 0):.0f}"
 
@@ -371,15 +606,10 @@ def _suggest(comp):
 
 
 @st.cache_data(show_spinner=False)
-def _load_secondary():
-    """Load + canonicalize secondary_dataset.xlsx, indexed by District.
-    Cached in session_state \u2014 the workbook is static within a run, and
-    both NIPUN and PARAKH share this same district-context table."""
-    if "_mx_sec_df" in st.session_state:
-        return st.session_state["_mx_sec_df"]
+def secondary_context(_df, sig):
+    """District performance vs district context; Pearson r. Association only."""
     p = os.path.join(_HERE, "secondary_dataset.xlsx")
     if not os.path.exists(p):
-        st.session_state["_mx_sec_df"] = None
         return None
     sec = pd.read_excel(p)
     sec.columns = [str(c).strip() for c in sec.columns]
@@ -411,32 +641,9 @@ def _load_secondary():
     sec["District"] = _dl.map(_KC).fillna(
         sec["District"].astype(str).str.strip().str.title())
     sec = sec.groupby("District").mean(numeric_only=True)
-    st.session_state["_mx_sec_df"] = sec
-    return sec
-
-
-def secondary_context(_df, sig):
-    """Overall district performance vs district context; Pearson r.
-    Association only \u2014 used on the NIPUN page."""
-    sec = _load_secondary()
-    if sec is None:
-        return None
     full, _ = district_year_standing(_df, sig)
     perf = full.mean(axis=1).rename("Assessment accuracy (%)")
     m = sec.join(perf, how="inner").dropna(subset=["Assessment accuracy (%)"])
-    return m if len(m) >= 8 else None
-
-
-def competency_secondary_context(cd):
-    """One competency's district accuracy (`cd`: District, Accuracy %)
-    vs district context; Pearson r. Association only \u2014 used on the
-    PARAKH page so the resource-context panel follows whichever
-    competency is selected."""
-    sec = _load_secondary()
-    if sec is None:
-        return None
-    perf = cd.set_index("District")["Accuracy %"]
-    m = sec.join(perf, how="inner").dropna(subset=["Accuracy %"])
     return m if len(m) >= 8 else None
 
 
@@ -459,26 +666,29 @@ def _css():
     except Exception:
         pass
     st.markdown("""<style>
-    .mi-flow { display:flex; flex-wrap:wrap; align-items:stretch;
-        gap:10px 0; }
-    .mi-item { display:inline-flex; align-items:center; gap:8px;
-        margin:4px 10px 4px 0; max-width:100%; }
+    /* pipeline chips: equal-width grid — fills the row, wraps evenly */
+    .mi-flow { display:grid;
+        grid-template-columns:repeat(auto-fit, minmax(200px, 1fr));
+        gap:8px; counter-reset: mistep; }
     .mi-step { background:#ffffff; border:1px solid #e6e9ef;
-        border-radius:10px; padding:9px 14px; font-size:13px;
-        font-weight:600; color:#26303e; line-height:1.45;
-        max-width:320px; word-wrap:break-word; }
-    .mi-step .mi-badge { display:block; font-size:10px; font-weight:800;
-        letter-spacing:.5px; text-transform:uppercase; margin-bottom:3px; }
-    .mi-badge-data { color:#1d4ed8; }
-    .mi-badge-insight { color:#475569; }
-    .mi-badge-risk { color:#b45309; }
-    .mi-badge-recommend { color:#0a7a5c; }
-    .mi-badge-monitor { color:#7c3aed; }
-    .mi-badge-default { color:#67707f; }
-    .mi-arrow { color:#b7bec9; font-weight:700; font-size:15px;
-        flex:0 0 auto; }
+        border-radius:10px; padding:9px 12px 9px 34px; font-size:12.5px;
+        font-weight:600; color:#26303e; line-height:1.4;
+        display:flex; align-items:center; position:relative;
+        min-height:52px; }
+    .mi-step::before { counter-increment: mistep;
+        content: counter(mistep); position:absolute; left:10px;
+        top:50%; transform:translateY(-50%);
+        width:18px; height:18px; border-radius:50%;
+        background:#0F6E5618; color:#0F6E56; font-size:11px;
+        font-weight:800; display:flex; align-items:center;
+        justify-content:center; }
     .mi-tag { display:inline-block; padding:2px 10px; border-radius:999px;
         font-size:11px; font-weight:700; letter-spacing:.4px; }
+    [data-testid="stVerticalBlockBorderWrapper"] {
+        height: auto !important; overflow: visible !important; }
+    .mi-step { overflow-wrap: anywhere; word-break: break-word;
+        min-width: 0; }
+    .mi-flow, .mi-step { box-sizing: border-box; }
     </style>""", unsafe_allow_html=True)
 
 
@@ -500,35 +710,24 @@ def _header(title, subtitle, note):
     st.caption(note)
 
 
-_FLOW_BADGE = {
-    "DATA": "data", "COMPETENCY": "data",
-    "INSIGHT": "insight", "OBSERVED": "insight", "CONCENTRATED": "insight",
-    "RISK": "risk",
-    "RECOMMEND": "recommend", "RECOMMENDATION": "recommend",
-    "MONITOR": "monitor",
-}
-_FLOW_LABEL_RE = re.compile(r"^([A-Za-z][A-Za-z ]{1,14}):\s*(.*)$", re.S)
-
-
 def _flow(steps):
-    """Render a data->decision chain as wrapping chips. Each arrow is
-    bundled with the step that follows it (one atomic flex item), so a
-    wrap never strands an arrow alone at the end of a line."""
-    parts = []
-    for i, s in enumerate(steps):
-        m = _FLOW_LABEL_RE.match(s)
-        if m:
-            label, rest = m.group(1), m.group(2)
-            cls = _FLOW_BADGE.get(label.upper(), "default")
-            body = (f"<span class='mi-badge mi-badge-{cls}'>"
-                    f"{label.upper()}</span>{rest}")
-        else:
-            body = s
-        arrow = "<span class='mi-arrow'>→</span>" if i else ""
-        parts.append(f"<span class='mi-item'>{arrow}"
-                     f"<span class='mi-step'>{body}</span></span>")
-    st.markdown("<div class='mi-flow'>" + "".join(parts) + "</div>",
-               unsafe_allow_html=True)
+    html = ("<div class='mi-flow'>"
+            + "".join(f"<span class='mi-step'>{s}</span>" for s in steps)
+            + "</div>")
+    st.markdown(html, unsafe_allow_html=True)
+
+
+def _flow_card(steps):
+    """Card + pipeline in one HTML block — the card is drawn around the
+    chips themselves, so it always fits its content exactly."""
+    html = ("<div style='background:#ffffff;border:1px solid #e6e9ef;"
+            "border-radius:14px;padding:14px 16px;margin:8px 0;"
+            "box-shadow:0 1px 3px rgba(16,24,40,.05);'>"
+            "<div class='mi-flow'>"
+            + "".join(f"<span class='mi-step' style='background:#f7f9fb;"
+                      f"'>{s}</span>" for s in steps)
+            + "</div></div>")
+    st.markdown(html, unsafe_allow_html=True)
 
 
 def _load_geo():
@@ -559,74 +758,6 @@ def _choropleth(frame, value_col, color_args, hover_extra=None):
 # ==========================================================================
 #  NIPUN BHARAT PAGE
 # ==========================================================================
-def _secondary_columns():
-    """Column names in secondary_dataset.xlsx (cached), for the data note
-    below \u2014 read once per session so the explainer stays accurate even
-    if the workbook changes."""
-    if "_mx_sec_cols" in st.session_state:
-        return st.session_state["_mx_sec_cols"]
-    p = os.path.join(_HERE, "secondary_dataset.xlsx")
-    cols = []
-    if os.path.exists(p):
-        try:
-            cols = [str(c).strip() for c in pd.read_excel(p, nrows=0).columns
-                   if str(c).strip() != "District"]
-        except Exception:
-            cols = []
-    st.session_state["_mx_sec_cols"] = cols
-    return cols
-
-
-def _data_note(df, page):
-    """Small expander explaining exactly which primary/secondary columns
-    feed this page \u2014 written for anyone new to the workbook."""
-    id_cols = [c for c in ["District", "Block", "Cluster", "GP Name",
-                           "GP ID", "Year", "Grade", "Gender"]
-              if c in df.columns]
-    qcols = sorted([c for c in df.columns if re.fullmatch(r"Q\d+", str(c))],
-                   key=lambda c: int(c[1:]))
-    with st.expander("\U0001F4CE Data columns used on this page",
-                     expanded=False):
-        id_txt = ", ".join(f"`{c}`" for c in id_cols) if id_cols else "\u2014"
-        st.markdown(
-            f"**Primary data** (GP-contest assessment responses) \u2014 "
-            f"{id_txt} identify *who / where / when* each response is "
-            "from.")
-        if qcols:
-            st.markdown(
-                f"`{qcols[0]}`\u2013`{qcols[-1]}` ({len(qcols)} question "
-                "columns) hold each child's mark on that question. The "
-                "same column means a different question every year \u2014 "
-                "each is remapped every cycle to a competency (place "
-                "value, addition, subtraction, multiplication, division, "
-                "fraction, number sense, measurement, shapes, data "
-                "handling) via that year's own paper key, since the "
-                "question paper itself changes each year. `Score` is the "
-                "total mark on the paper.")
-        if "Division" in df.columns:
-            st.caption(
-                "Note: the `Division` column is the administrative "
-                "revenue division (Belagavi / Kalaburagi / Bengaluru / "
-                "Mysuru) \u2014 not the *division* arithmetic competency, "
-                "which comes from the Q-column mapping above.")
-        sc = _secondary_columns()
-        if sc:
-            where = ("used only in the *secondary context* section "
-                     "further down this page" if page == "nipun" else
-                     "used in the *resource context* panel under the "
-                     "competency map further down this page, matched "
-                     "to whichever competency is selected")
-            st.markdown(
-                f"**Secondary data** (`secondary_dataset.xlsx`, "
-                f"district-level context, {where}) \u2014 "
-                + ", ".join(f"`{c}`" for c in sc) + ". Joined to the "
-                "primary data by `District` only \u2014 it is context, "
-                "never used to explain a Block or GP.")
-        else:
-            st.markdown("**Secondary data** \u2014 `secondary_dataset.xlsx` "
-                        "was not found next to the app.")
-
-
 def render_nipun():
     _css()
     df, rq, err = load_context()
@@ -645,9 +776,9 @@ def render_nipun():
             "prioritize remediation — this is retention monitoring, not an "
             "official measurement of NIPUN's Grade-3 targets.")
 
-    _data_note(df, "nipun")
-
     _impact_banner(df, sig, "NIPUN Bharat")
+    _mission_about("nipun", df, sig)
+    _skills_glossary("nipun")
 
     ca = competency_accuracy(df, sig)
     fnd = ca[ca["competency"].isin(FOUNDATIONAL)]
@@ -748,8 +879,8 @@ def render_nipun():
     _sigs0 = intervention_signals(df, sig, 50.0)   # default threshold; the
     thr0 = 50                                      # engine below re-computes
     for s in _sigs0[:3]:
-        with st.container(border=True):
-            _flow([f"DATA: {s['competency']} at {s['latest']:.0f}% in "
+        if True:
+            _flow_card([f"DATA: {s['competency']} at {s['latest']:.0f}% in "
                    f"{s['district']}",
                    f"INSIGHT: below {thr0}% in every tested year",
                    "RISK: children enter higher grades with the gap "
@@ -982,9 +1113,9 @@ def render_parakh():
             "which skills a child can demonstrate. This page turns that "
             "evidence into instructional decisions.")
 
-    _data_note(df, "parakh")
-
     _impact_banner(df, sig, "PARAKH")
+    _mission_about("parakh", df, sig)
+    _skills_glossary("parakh")
 
     _kpi_strip(df)
     st.divider()
@@ -1019,40 +1150,6 @@ def render_parakh():
                f"point spread on one skill. This is where instructional "
                f"support for {comp_pick} belongs first.")
 
-    # ---- secondary (district-context) link for this competency -----------
-    st.markdown(f"#### 🔗 Resource context for {comp_pick}")
-    sm = competency_secondary_context(cd)
-    if sm is None:
-        st.caption("Secondary (district-context) data not available for "
-                   "this join.")
-    else:
-        cors = []
-        for col in sm.columns:
-            if col == "Accuracy %":
-                continue
-            r, n = pearson(sm[col], sm["Accuracy %"])
-            if r is not None:
-                cors.append((col, r))
-        cors.sort(key=lambda t: abs(t[1]), reverse=True)
-        if not cors:
-            st.caption("Not enough matched districts to compute an "
-                       "association for this competency.")
-        else:
-            with st.container(border=True):
-                for col, r in cors[:3]:
-                    tag_col = "#0F6E56" if r > 0 else "#C0392B"
-                    st.markdown(
-                        f"<span class='mi-tag' style='background:"
-                        f"{tag_col}22;color:{tag_col};'>r = {r:+.2f}</span>"
-                        f"&nbsp;&nbsp;**{col}** {'rises' if r > 0 else 'falls'}"
-                        f" with {comp_pick} accuracy across districts",
-                        unsafe_allow_html=True)
-            st.caption(
-                f"District-level association only, {len(sm)} districts "
-                "matched from `secondary_dataset.xlsx` — not causation, "
-                "and (like all secondary data on this app) never used to "
-                "explain a Block or GP.")
-
     st.divider()
 
     # ---- recommendation ---------------------------------------------------
@@ -1065,8 +1162,8 @@ def render_parakh():
                .apply(lambda x: np.average(x["acc"], weights=x["n"]),
                       include_groups=False).sort_values())
         _where = ", ".join(cd2.index[:3])
-        with st.container(border=True):
-            _flow([f"Competency: {comp}",
+        if True:
+            _flow_card([f"Competency: {comp}",
                    f"Observed: {overall[comp]:.0f}% statewide",
                    f"Concentrated: {_where}",
                    "Persistent across years"

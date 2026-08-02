@@ -3271,6 +3271,160 @@ with tabs[3]:
                     else:
                         st.info("No hierarchy columns detected.")
 
+                # ---- in-depth additions, scoped to their sub-tabs -------
+                with _t2:
+                    if year_col and _gg[year_col].nunique() > 1:
+                        st.subheader("📈 Is the gap growing? — trajectory")
+                        _tj = (_gg.groupby([year_col, "_g"])[score_col]
+                               .mean().unstack())
+                        _tj = _pctg(_tj)
+                        _tj["gap"] = _tj["Female"] - _tj["Male"]
+                        figt = go.Figure()
+                        if grade_col and grade_col in _gg.columns:
+                            _tg = (_gg.groupby([year_col, _gg[grade_col],
+                                                "_g"])[score_col]
+                                   .mean().unstack())
+                            _tg = _pctg(_tg)
+                            _tg["gap"] = _tg["Female"] - _tg["Male"]
+                            _tg = _tg.reset_index()
+                            for gr, sub in _tg.groupby(grade_col):
+                                figt.add_scatter(
+                                    x=sub[year_col], y=sub["gap"],
+                                    mode="lines+markers",
+                                    name=f"Grade {int(gr)}",
+                                    line=dict(width=1.6, dash="dot"))
+                        figt.add_scatter(
+                            x=_tj.index, y=_tj["gap"],
+                            mode="lines+markers+text",
+                            text=[f"{v:+.1f}" for v in _tj["gap"]],
+                            textposition="top center", name="All grades",
+                            line=dict(color="#ff2d78", width=4))
+                        figt.add_hline(y=0, line_dash="dot",
+                                       line_color="#98a2b3")
+                        figt.update_layout(
+                            height=330,
+                            yaxis_title="Gap (girls − boys, pts)",
+                            margin=dict(t=10, b=10),
+                            legend=dict(orientation="h", y=-0.25))
+                        st.plotly_chart(figt, use_container_width=True)
+                        _g0v = float(_tj["gap"].iloc[0])
+                        _g1v = float(_tj["gap"].iloc[-1])
+                        _dirw = ("widening in girls' favour"
+                                 if _g1v > _g0v + 0.3 else
+                                 "narrowing" if _g1v < _g0v - 0.3 else
+                                 "holding steady")
+                        st.caption(
+                            f"**How to read:** above the dotted zero line "
+                            f"= girls ahead. The gap went {_g0v:+.1f} → "
+                            f"{_g1v:+.1f} pts — **{_dirw}**. Valid across "
+                            f"years even though papers change: both "
+                            f"genders sit the same paper, so the gap is a "
+                            f"fair within-paper comparison.")
+
+                with _t3:
+                    st.subheader("🔍 Where each side leads — top 5 "
+                                 "districts")
+                    _lvl_g = next((h for h in hierarchy
+                                   if str(h).lower() == "district"),
+                                  hierarchy[0] if hierarchy else None)
+                    _w = None
+                    if _lvl_g and _lvl_g in _gg.columns:
+                        _p = (_gg.groupby([_lvl_g, "_g"])[score_col]
+                              .agg(["mean", "size"]).reset_index())
+                        _p = _p[_p["size"] >= MINN]
+                        _w = _p.pivot(index=_lvl_g, columns="_g",
+                                      values="mean").dropna()
+                    if _w is not None and len(_w) >= 3:
+                        _w = _pctg(_w)
+                        _w["gap"] = (_w["Female"] - _w["Male"]).round(1)
+                        _gl = _w.nlargest(5, "gap")
+                        _bl = _w.nsmallest(5, "gap")
+                        _share = float((_w["gap"] > 0).mean() * 100)
+                        gcl1, gcl2 = st.columns(2)
+                        with gcl1:
+                            st.markdown("**👧 Girls furthest ahead**")
+                            for d, r in _gl.iterrows():
+                                st.markdown(
+                                    f"<div style='border:1px solid "
+                                    f"#e6e9ef;border-left:4px solid "
+                                    f"#ff2d78;border-radius:8px;"
+                                    f"padding:6px 12px;margin:4px 0;"
+                                    f"background:#fff;'><b>{d}</b> — "
+                                    f"girls +{r['gap']:.1f} pts"
+                                    f"<span style='color:#67707f;"
+                                    f"font-size:12px;'> (girls "
+                                    f"{r['Female']:.1f}% · boys "
+                                    f"{r['Male']:.1f}%)</span></div>",
+                                    unsafe_allow_html=True)
+                        with gcl2:
+                            st.markdown("**👦 Boys furthest ahead**")
+                            _bl2 = _bl[_bl["gap"] < 0]
+                            if len(_bl2) == 0:
+                                st.success("No district in the current "
+                                           "selection has boys ahead — "
+                                           "girls lead everywhere.")
+                            for d, r in _bl2.iterrows():
+                                st.markdown(
+                                    f"<div style='border:1px solid "
+                                    f"#e6e9ef;border-left:4px solid "
+                                    f"#00b4d8;border-radius:8px;"
+                                    f"padding:6px 12px;margin:4px 0;"
+                                    f"background:#fff;'><b>{d}</b> — "
+                                    f"boys +{abs(r['gap']):.1f} pts"
+                                    f"<span style='color:#67707f;"
+                                    f"font-size:12px;'> (girls "
+                                    f"{r['Female']:.1f}% · boys "
+                                    f"{r['Male']:.1f}%)</span></div>",
+                                    unsafe_allow_html=True)
+                        st.caption(
+                            f"**How to read:** each card = one district's "
+                            f"gender gap in points (girls − boys); groups "
+                            f"under {MINN} students per gender excluded. "
+                            f"Girls lead in **{_share:.0f}%** of the "
+                            f"{len(_w)} eligible districts — a boys-lead "
+                            f"district is the unusual case worth "
+                            f"investigating first.")
+
+                        st.subheader("⚖️ Equity vs excellence — is girls' "
+                                     "lead biggest where learning is "
+                                     "weakest?")
+                        if len(_w) >= 8:
+                            _eq = _w.copy()
+                            _eq["avg"] = (_eq["Female"] + _eq["Male"]) / 2
+                            figeq = px.scatter(
+                                _eq.reset_index(), x="avg", y="gap",
+                                hover_name=_lvl_g, height=380,
+                                color="gap", color_continuous_scale="RdBu",
+                                color_continuous_midpoint=0,
+                                labels={"avg": "District average (%)",
+                                        "gap": "Gap (girls − boys, pts)"})
+                            figeq.add_hline(y=0, line_dash="dot",
+                                            line_color="#98a2b3")
+                            figeq.add_vline(x=float(_eq["avg"].mean()),
+                                            line_dash="dot",
+                                            line_color="#98a2b3")
+                            figeq.update_layout(coloraxis_showscale=False,
+                                                margin=dict(t=10, b=10))
+                            st.plotly_chart(figeq,
+                                            use_container_width=True)
+                            _req = float(np.corrcoef(_eq["avg"],
+                                                     _eq["gap"])[0, 1])
+                            _story = (
+                                "girls' lead is LARGEST in weaker "
+                                "districts — a pattern often read as "
+                                "boys disengaging where schooling is "
+                                "weakest" if _req < -0.25 else
+                                "girls' lead grows WITH district "
+                                "performance" if _req > 0.25 else
+                                "girls' lead is broadly similar in "
+                                "strong and weak districts")
+                            st.caption(
+                                f"**How to read:** right = better "
+                                f"district, up = girls further ahead. "
+                                f"r = {_req:+.2f} across {len(_eq)} "
+                                f"districts: {_story}. Association, "
+                                f"not causation.")
+
                 with st.expander("Full gender table"):
                     _keys = ([comp_col] if comp_col else []) or None
                     _tbl = (_gg.groupby(([comp_col] if comp_col else
