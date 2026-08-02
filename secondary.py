@@ -40,6 +40,11 @@ ALPHA = 0.05
 MIN_OUTCOME_CV = 1.0          # percent
 # R^2 above which one variable is treated as an algebraic restatement of another
 DERIVED_R2 = 0.999
+# Fewest districts an indicator must actually cover to be worth testing. Below
+# this a correlation is driven by whichever handful of rows happened to be
+# populated, and reporting it alongside a 29-district result implies a
+# comparability that is not there.
+MIN_N = 10
 
 
 # ------------------------------------------------------------------ stats
@@ -765,6 +770,223 @@ def analyse(merged, outcome, controls=None, key="District"):
         "sentences": verbalize(table, outcome),
         "method": describe(),
     }
+
+
+# ==========================================================================
+#  Indicator families: does WHAT a district HAS matter, or WHO lives in it?
+#
+#  The raw context file is almost all COUNTS — "Total Libraries", "Internet",
+#  "Rural Male Literacy". Correlating a count against an outcome mostly
+#  measures how BIG the district is, which is why the raw columns come back
+#  flat: Internet r=+0.02, Computer Available r=-0.01. Divided by a sensible
+#  denominator the same columns become intensities, and the picture separates
+#  sharply — every human-capital indicator survives FDR, no infrastructure
+#  indicator does.
+#
+#  Each indicator carries the denominator IN ITS NAME so a reader can check
+#  the arithmetic, and a `family` so the contrast can be drawn.
+# ==========================================================================
+
+# (label, family, numerator, denominator, scale). denominator None = raw.
+INDICATOR_SPECS = [
+    # ---- what a district HAS -------------------------------------------
+    ("Libraries per 100k households", "Infrastructure",
+     "Total Libraries", "Total Household", 1e5),
+    ("Computers per 1000 students", "Infrastructure",
+     "Computer Available", "Student Enrolment", 1e3),
+    ("Internet per 1000 students", "Infrastructure",
+     "Internet", "Student Enrolment", 1e3),
+    # Of the schools that HAVE computers, how many can get online? A district
+    # can look well-equipped and still be running dark labs.
+    ("Connected computer share (%)", "Infrastructure",
+     "Internet", "Computer Available", 100.0),
+    ("Urban share of households (%)", "Infrastructure",
+     "Urban Household", "Total Household", 100.0),
+    # ---- who LIVES there -----------------------------------------------
+    ("Per capita income", "Human capital", "Per Capita Income", None, 1.0),
+    ("Rural literates per household", "Human capital",
+     "Rural Total Literacy", "Rural Household", 1.0),
+    ("Urban literates per household", "Human capital",
+     "Urban Total Literacy", "Urban Household", 1.0),
+    ("Rural female literacy share (%)", "Human capital",
+     "Rural Female Literacy", "Rural Total Literacy", 100.0),
+    ("Urban female literacy share (%)", "Human capital",
+     "Urban Female Literacy", "Urban Total Literacy", 100.0),
+    # ---- the school system ---------------------------------------------
+    # Student Teacher Ratio is the file's own column and reconciles with
+    # Student Enrolment / Primary Teachers Total — see TEACHER_COLUMN_NOTE.
+    ("Student-teacher ratio", "Teachers", "Student Teacher Ratio", None, 1.0),
+    ("Teachers per 1000 students", "Teachers",
+     "Primary Teachers Total", "Student Enrolment", 1e3),
+    ("Female share of teachers (%)", "Teachers",
+     "Primary Teachers Female", "Primary Teachers Total", 100.0),
+    # ---- size and reach -------------------------------------------------
+    ("Children per household", "Households",
+     "Student Enrolment", "Total Household", 1.0),
+]
+
+# The context file carries two teacher counts that cannot both be right:
+# "Primary+Upper Primary Teachers (Total)" is SMALLER than "Primary Teachers
+# Total" in nearly every district, which is impossible if the former contains
+# the latter. Student Teacher Ratio reconciles with Primary Teachers Total
+# (283168/10294 = 27.5 vs a stated 27), so that is the column we trust and
+# the Primary+Upper Primary columns are left out of the indicator set.
+TEACHER_COLUMN_NOTE = (
+    '"Primary+Upper Primary Teachers (Total)" is smaller than "Primary '
+    'Teachers Total" in almost every district, which cannot be true if the '
+    'first includes the second. Student-teacher ratio reconciles with '
+    '"Primary Teachers Total", so the Primary+Upper Primary columns are '
+    'excluded.')
+
+
+def _teacher_column_conflict(df):
+    """How many districts show the impossible ordering? None if not checkable."""
+    a, b = "Primary Teachers Total", "Primary+Upper Primary Teachers (Total)"
+    if a not in df.columns or b not in df.columns:
+        return None
+    pair = df[[a, b]].apply(pd.to_numeric, errors="coerce").dropna()
+    if pair.empty:
+        return None
+    return {"n_bad": int((pair[b] < pair[a]).sum()), "n": int(len(pair)),
+            "note": TEACHER_COLUMN_NOTE}
+
+
+def build_indicators(df, specs=None):
+    """
+    Turn the raw context columns into per-head intensities.
+
+    Returns (frame, families, skipped). A spec whose columns are missing is
+    SKIPPED and reported, never silently filled — a column that quietly
+    becomes NaN would drop districts from every correlation downstream
+    without anything on screen saying so.
+    """
+    specs = specs or INDICATOR_SPECS
+    out, fam, skipped = {}, {}, []
+    for label, family, num, den, scale in specs:
+        if num not in df.columns or (den is not None and den not in df.columns):
+            skipped.append(label)
+            continue
+        n = pd.to_numeric(df[num], errors="coerce")
+        if den is None:
+            v = n * scale
+        else:
+            d = pd.to_numeric(df[den], errors="coerce")
+            # A zero denominator is missing information, not an infinite rate.
+            v = n / d.replace(0, np.nan) * scale
+        if v.notna().sum() < MIN_N or v.nunique(dropna=True) < 3:
+            skipped.append(label)
+            continue
+        out[label] = v
+        fam[label] = family
+    return pd.DataFrame(out, index=df.index), fam, skipped
+
+
+def indicator_families(df, outcome, specs=None):
+    """
+    Every indicator against the outcome, grouped by family, FDR-corrected
+    across the WHOLE set — one family of tests, one correction. Correcting
+    within each family separately would make "infrastructure" easier to pass
+    simply for being a smaller group, which is the opposite of honest.
+    """
+    if df is None or outcome not in getattr(df, "columns", []):
+        return None
+    ind, fam, skipped = build_indicators(df, specs)
+    if ind.empty:
+        return None
+    y = pd.to_numeric(df[outcome], errors="coerce")
+    rows = []
+    for label in ind.columns:
+        r, p, n = pearson(ind[label], y)
+        if not np.isfinite(r):
+            continue
+        lo, hi = fisher_ci(r, n)
+        rows.append({"indicator": label, "family": fam[label], "r": r,
+                     "p_raw": p, "n": n, "ci_low": lo, "ci_high": hi,
+                     "strength": strength_label(r)})
+    if not rows:
+        return None
+    table = pd.DataFrame(rows).sort_values("p_raw").reset_index(drop=True)
+    table["p_adj"] = bh_fdr(table["p_raw"].tolist())
+    table["survives"] = table["p_adj"] < ALPHA
+    by_family = (table.groupby("family")
+                 .agg(mean_abs_r=("r", lambda s: float(s.abs().mean())),
+                      max_abs_r=("r", lambda s: float(s.abs().max())),
+                      n_tested=("r", "size"),
+                      n_survive=("survives", "sum"))
+                 .reset_index()
+                 .sort_values("mean_abs_r", ascending=False))
+    return {"table": table, "by_family": by_family, "indicators": ind,
+            "skipped": skipped, "n_districts": int(len(df)),
+            "min_detectable_r": min_detectable_r(int(y.notna().sum())),
+            "teacher_conflict": _teacher_column_conflict(df)}
+
+
+# ---------------------------------------------------- competency grouping
+def competency_predictability(df, comp_cols, controls=None, key="District"):
+    """
+    How much of each competency can district context predict?
+
+    `comp_cols` are columns already carrying one competency each. The caller
+    supplies them because the assessment's OWN competency mapping is the only
+    correct one, and in the real GP-contest data that mapping changes every
+    year and grade — Q1 is "number sense" on one paper and "place value" on
+    another. Folding items into competencies here, from a flat question map,
+    would average two different skills under one label. adapter.build_agg()
+    already applies the per-paper map, so by the time a district x competency
+    frame exists the grouping is done and correct.
+
+    Every R² here is LEAVE-ONE-OUT: each district is predicted by a model
+    refitted without it. In-sample R² on ~29 districts with 4 predictors is
+    inflated by construction, and quoting the inflated number would overstate
+    how much circumstance really determines. Both are returned so the gap is
+    visible.
+
+    A NEGATIVE loo_r2 means the model predicts a held-out district worse than
+    the state average would — reported as-is, not clipped, because clipping
+    it to 0 would disguise a failed model as a weak one.
+    """
+    if df is None:
+        return None
+    comp_cols = [c for c in (comp_cols or []) if c in getattr(df, "columns", [])]
+    if not comp_cols:
+        return None
+    use = [c for c in (controls or []) if c in df.columns]
+    if len(use) < 1:
+        return None
+    X = df[use].apply(pd.to_numeric, errors="coerce")
+    rows = []
+    for name in comp_cols:
+        y = pd.to_numeric(df[name], errors="coerce")
+        ok = y.notna() & X.notna().all(axis=1)
+        n = int(ok.sum())
+        # Need comfortably more districts than predictors or the fit is
+        # interpolation, not estimation.
+        if n < max(MIN_N, len(use) + 5):
+            continue
+        Xa = X[ok].to_numpy(float)
+        Xa = (Xa - Xa.mean(0)) / np.where(Xa.std(0) == 0, 1.0, Xa.std(0))
+        A = np.c_[np.ones(n), Xa]
+        yv = y[ok].to_numpy(float)
+        sst = float(((yv - yv.mean()) ** 2).sum())
+        if sst <= 0:
+            continue
+        beta = np.linalg.lstsq(A, yv, rcond=None)[0]
+        in_r2 = 1.0 - float(((yv - A @ beta) ** 2).sum()) / sst
+        pred = np.empty(n)
+        for i in range(n):
+            keep = np.ones(n, bool)
+            keep[i] = False
+            b = np.linalg.lstsq(A[keep], yv[keep], rcond=None)[0]
+            pred[i] = float(A[i] @ b)
+        loo_r2 = 1.0 - float(((yv - pred) ** 2).sum()) / sst
+        rows.append({"competency": name, "n": n,
+                     "mean_score": float(yv.mean()),
+                     "in_sample_r2": in_r2, "loo_r2": loo_r2,
+                     "loo_mae": float(np.abs(yv - pred).mean())})
+    if not rows:
+        return None
+    table = pd.DataFrame(rows).sort_values("loo_r2", ascending=False)
+    return {"table": table.reset_index(drop=True), "controls": use}
 
 
 if __name__ == "__main__":

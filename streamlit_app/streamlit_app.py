@@ -1740,6 +1740,67 @@ def _c_resource_gaps(_context, ctx_sig, district):
     return L_playbook.resource_gaps(_context, district)
 
 @st.cache_data(show_spinner=False)
+def _c_indicator_families(_merged, outcome, sig):
+    """Per-head rates for every context column, grouped into families."""
+    return L_secondary.indicator_families(_merged, outcome)
+
+@st.cache_data(show_spinner=False)
+def _c_competency_predictability(_agg, _merged, sig):
+    """
+    How far district context reaches into each competency.
+
+    The competency breakdown is rebuilt from AGG rather than read off a
+    pre-merged district file, because adapter.build_agg() has already applied
+    the assessment's OWN question map — which in the real GP-contest data
+    differs by year AND grade. A flat "Q7 is subtraction" map would average
+    two different skills together on papers where Q7 moved.
+    """
+    if _agg is None or _merged is None or "competency" not in _agg.columns:
+        return None
+    _w = _agg.dropna(subset=["below_pct", "n"])
+    if _w.empty:
+        return None
+    # Weight by responses: a district's competency score is its children's
+    # score, not the unweighted mean of its blocks.
+    _num = _w.assign(_x=_w["below_pct"] * _w["n"])
+    _piv = (_num.groupby(["district", "competency"])[["_x", "n"]].sum()
+            .assign(v=lambda d: d["_x"] / d["n"])["v"].unstack())
+    if _piv is None or _piv.empty or _piv.shape[1] < 2:
+        return None
+    # A competency present for only a handful of districts cannot be compared
+    # against one measured everywhere — drop it rather than let the model
+    # silently fit a different set of districts per column.
+    _piv = _piv.loc[:, _piv.notna().sum() >= max(L_secondary.MIN_N,
+                                                 int(0.6 * len(_piv)))]
+    if _piv.empty or _piv.shape[1] < 2:
+        return None
+    _cd = pd.DataFrame({"District": _piv.index.astype(str)})
+    for _c in _piv.columns:
+        _cd[str(_c)] = _piv[_c].values
+    # The join upstream REPLACED primary spellings with the context file's,
+    # so resolve through the same alias table instead of a plain equality.
+    _targets = _merged["District"].astype(str).tolist()
+    _amap, _ = L_secondary.align_districts(_cd["District"].tolist(), _targets)
+    _cd["District"] = _cd["District"].map(_amap).fillna(_cd["District"])
+    _ind, _fam, _ = L_secondary.build_indicators(_merged)
+    if _ind.empty:
+        return None
+    _ctx = _merged[["District"]].copy()
+    for _c in _ind.columns:
+        _ctx[_c] = _ind[_c].values
+    _joined = _cd.merge(_ctx, on="District", how="inner")
+    if len(_joined) < L_secondary.MIN_N:
+        return None
+    # Prefer one strong indicator per family over every rate we can build:
+    # at ~29 districts each extra predictor buys in-sample fit and loses
+    # out-of-sample truth, which is the number this section reports.
+    _want = ["Per capita income", "Rural literates per household",
+             "Student-teacher ratio", "Teachers per 1000 students"]
+    _controls = [c for c in _want if c in _joined.columns]
+    return L_secondary.competency_predictability(
+        _joined, [str(c) for c in _piv.columns], controls=_controls)
+
+@st.cache_data(show_spinner=False)
 def _c_playbook_recommend(_agg, agg_sig, district, limit=12):
     return L_playbook.recommend(_agg, district, limit=limit)
 
@@ -5793,6 +5854,269 @@ It slopes {'**down**' if _t0['r'] < 0 else '**up**'} — districts with more
 {_t0['variable']} have {_dirw} children behind. But the dots sit a long way
 from the line, and that scatter is exactly what r = {_t0['r']:+.2f} measures.
 Graph 1 turns that scatter into the grey bar.""")
+
+        # =================================================================
+        #  NEW SECTION — what actually moves scores, and what context can
+        #  and cannot reach.
+        #
+        #  The section above tests the context file's columns AS GIVEN. Most
+        #  of them are COUNTS ("Internet", "Total Libraries", "Rural Male
+        #  Literacy"), so correlating them against an outcome largely measures
+        #  how BIG a district is — which is why they come back flat. Dividing
+        #  each by its proper denominator turns it into an intensity, and the
+        #  picture separates: what a district HAS barely moves, who LIVES
+        #  there moves a lot.
+        # =================================================================
+        st.divider()
+        st.markdown("### 🔍 What actually moves maths scores?")
+        st.caption(
+            "The chart above tests the district columns exactly as the file "
+            "supplies them — mostly totals. A big district has more libraries "
+            "and more literate adults simply because it has more people, so "
+            "those totals mostly measure size. Here every column is divided "
+            "by what it should be divided by (per student, per household, per "
+            "school) to ask a fairer question: not *how much does this "
+            "district have*, but *how much per child*.")
+
+        with st.expander("📖 What's in each family"):
+            _spec_rows = [{"Family": _f, "Indicator": _lbl,
+                           "Built from": (_num if _den is None
+                                         else f"{_num} ÷ {_den}")}
+                          for _lbl, _f, _num, _den, _ in L_secondary.INDICATOR_SPECS]
+            _spec_df = pd.DataFrame(_spec_rows)
+            st.dataframe(_spec_df, use_container_width=True, hide_index=True)
+            st.caption(
+                "**Infrastructure** — libraries, computers, internet, how "
+                "urban a district is: things a government builds or buys. "
+                "**Human capital** — income and adult literacy: things about "
+                "the people who already live there. **Teachers** — staffing "
+                "levels and ratios. **Households** — family size relative to "
+                "how many children are in school. The Primary+Upper Primary "
+                "teacher columns are left out on purpose — see the "
+                "data-quality note below.")
+
+        _jsig = f"{AGG_SIG}|{merged.shape}|{_outcome}"
+        _fam = _c_indicator_families(merged, _outcome, _jsig)
+
+        if _fam is None:
+            st.info(
+                "Not enough of the district columns could be converted into "
+                "per-head rates for this comparison — it needs the household, "
+                "enrolment and teacher counts to use as denominators.")
+        else:
+            _ft, _fby = _fam["table"], _fam["by_family"]
+            _nsurv = int(_ft["survives"].sum())
+            _hc = _fby[_fby["family"] == "Human capital"]
+            _inf = _fby[_fby["family"] == "Infrastructure"]
+
+            # ---- the plain-language verdict ----------------------------
+            if len(_hc) and len(_inf) and float(_inf["mean_abs_r"].iloc[0]) > 0:
+                _ratio = (float(_hc["mean_abs_r"].iloc[0]) /
+                          float(_inf["mean_abs_r"].iloc[0]))
+                st.markdown(
+                    f"**Things about *people* track scores "
+                    f"{_ratio:.1f}× more strongly than things about "
+                    f"*buildings*.** Income and adult literacy move together "
+                    f"with how children do. Libraries, computers, internet "
+                    f"and how urban a district is do not.")
+
+            _c1, _c2 = st.columns(2)
+            with _c1:
+                st.metric("Indicators tested", len(_ft))
+                st.caption(f"across {len(_fby)} families, "
+                           f"{_fam['n_districts']} districts")
+            with _c2:
+                st.metric("Strong enough to confirm", _nsurv)
+                st.caption("after correcting for testing many things at once")
+
+            # ---- Graph 3: every indicator, grouped by family -----------
+            _fig3 = go.Figure()
+            _palette = {"Human capital": "#27ae60", "Teachers": "#2980b9",
+                        "Households": "#8e44ad", "Infrastructure": "#c0392b"}
+            for _f in _fby["family"]:
+                _sub = _ft[_ft["family"] == _f].sort_values(
+                    "r", key=lambda s: s.abs())
+                _fig3.add_trace(go.Bar(
+                    x=_sub["r"].abs(), y=_sub["indicator"], orientation="h",
+                    name=_f, marker_color=_palette.get(_f, "#7f8c8d"),
+                    customdata=np.stack([_sub["r"], _sub["p_adj"]], axis=-1),
+                    hovertemplate=("<b>%{y}</b><br>strength %{x:.2f}"
+                                   "<br>direction r=%{customdata[0]:+.2f}"
+                                   "<br>corrected p=%{customdata[1]:.3f}"
+                                   "<extra></extra>")))
+            # The detection floor: below this, an indicator is invisible at
+            # this many districts however real it might be. Without the line
+            # a short bar reads as "we checked and it's nothing", which is a
+            # different claim from "we cannot see it from here".
+            _crit3 = _fam.get("min_detectable_r")
+            if _crit3 and np.isfinite(_crit3):
+                _fig3.add_vline(
+                    x=float(_crit3), line_dash="dot", line_color="#888",
+                    annotation_text="too small to detect",
+                    annotation_position="top")
+            _fig3.update_layout(
+                barmode="stack", height=460,
+                xaxis_title="how strongly it tracks results (0 = not at all)",
+                yaxis_title="", legend_title="",
+                legend=dict(orientation="h", y=-0.18),
+                margin=dict(l=10, r=10, t=30, b=10))
+            st.plotly_chart(_fig3, use_container_width=True)
+
+            st.markdown(
+                f"""**Graph 3 — every district fact, per child, sorted by family.**
+
+Longer bar = tracks results more closely. **Green = facts about people.
+Red = facts about buildings and equipment.** Anything left of the dotted line
+is too small to tell apart from chance with {_fam['n_districts']} districts.
+
+Notice the colours do not mix: the green bars sit on the right, the red bars
+on the left.""")
+
+            # ---- Graph 4: the family summary ---------------------------
+            _fig4 = go.Figure(go.Bar(
+                x=_fby["family"], y=_fby["mean_abs_r"],
+                marker_color=[_palette.get(f, "#7f8c8d")
+                              for f in _fby["family"]],
+                text=[f"{v:.2f}" for v in _fby["mean_abs_r"]],
+                textposition="outside",
+                customdata=np.stack([_fby["n_survive"], _fby["n_tested"]],
+                                    axis=-1),
+                hovertemplate=("<b>%{x}</b><br>average strength %{y:.2f}"
+                               "<br>%{customdata[0]} of %{customdata[1]} "
+                               "confirmed<extra></extra>")))
+            _fig4.update_layout(
+                height=330, yaxis_title="average strength", xaxis_title="",
+                margin=dict(l=10, r=10, t=30, b=10))
+            st.plotly_chart(_fig4, use_container_width=True)
+
+            _fbits = ", ".join(
+                f"**{r.family}** {r.mean_abs_r:.2f} "
+                f"({int(r.n_survive)}/{int(r.n_tested)} confirmed)"
+                for r in _fby.itertuples())
+            st.markdown(f"""**Graph 4 — the four families side by side.**
+
+{_fbits}
+
+This is the finding in one picture. If buildings drove results, the red bar
+would be tall. It is the shortest one.""")
+
+            with st.expander("📋 Every indicator, with the numbers"):
+                _show = _ft.copy()
+                _show["direction"] = np.where(
+                    _show["r"] < 0, "more of it → fewer behind",
+                    "more of it → more behind")
+                _show["confirmed"] = np.where(_show["survives"], "yes", "no")
+                st.dataframe(
+                    _show[["indicator", "family", "r", "p_adj", "n",
+                           "direction", "confirmed"]]
+                    .rename(columns={"r": "strength (r)",
+                                     "p_adj": "corrected p",
+                                     "n": "districts"})
+                    .round(3), use_container_width=True, hide_index=True)
+                if _fam.get("skipped"):
+                    st.caption("Not computable from this file: " +
+                               ", ".join(_fam["skipped"]))
+                _tc = _fam.get("teacher_conflict")
+                if _tc and _tc["n_bad"]:
+                    st.warning(
+                        f"⚠️ **Data-quality note.** {_tc['n_bad']} of "
+                        f"{_tc['n']} districts have "
+                        f"{_tc['note'][0].lower()}{_tc['note'][1:]}")
+
+        # =================================================================
+        #  Part B — what context can and cannot reach
+        # =================================================================
+        st.markdown("### 🎯 What your circumstances decide — and what they don't")
+
+        _pred = _c_competency_predictability(AGG, merged, _jsig)
+
+        if _pred is None or _pred["table"].empty:
+            st.info(
+                "This needs a district-by-competency breakdown plus at least "
+                "one usable context rate — not available for the current "
+                "selection.")
+        else:
+            _pt = _pred["table"]
+            _best, _worst = _pt.iloc[0], _pt.iloc[-1]
+
+            st.caption(
+                "For each competency we ask: knowing only a district's income, "
+                "adult literacy and teacher numbers — **nothing about the "
+                "children** — how well can we guess its result? Every number "
+                "below is scored on districts the model never saw, so it "
+                "cannot flatter itself.")
+
+            if float(_best["loo_r2"]) > float(_worst["loo_r2"]):
+                st.markdown(
+                    f"**Circumstances reach some skills much further than "
+                    f"others.** We can account for "
+                    f"**{max(float(_best['loo_r2']), 0) * 100:.0f}%** of how "
+                    f"districts differ on **{_best['competency']}**, but only "
+                    f"**{max(float(_worst['loo_r2']), 0) * 100:.0f}%** on "
+                    f"**{_worst['competency']}**.")
+                st.success(
+                    f"**This is the hopeful part.** The skills at the bottom "
+                    f"of this chart are the ones a district's wealth and "
+                    f"literacy barely touch — which means they are the ones "
+                    f"teaching can still move. **{_worst['competency']}** is "
+                    f"the least decided by circumstance.")
+
+            _pp = _pt.copy()
+            # A negative LOO R2 means the model did WORSE than guessing the
+            # state average. Plotting it as a bar below zero says that
+            # plainly; clipping it to zero would dress a failed model up as
+            # a merely weak one.
+            _fig5 = go.Figure()
+            _fig5.add_trace(go.Bar(
+                x=_pp["competency"], y=_pp["loo_r2"],
+                marker_color=["#c0392b" if v < 0 else "#2980b9"
+                              for v in _pp["loo_r2"]],
+                name="what context predicts (honest)",
+                customdata=np.stack([_pp["in_sample_r2"], _pp["loo_mae"],
+                                     _pp["mean_score"]], axis=-1),
+                hovertemplate=("<b>%{x}</b><br>context predicts %{y:.0%}"
+                               "<br>(flattering figure %{customdata[0]:.0%})"
+                               "<br>typical miss %{customdata[1]:.1f} pts"
+                               "<extra></extra>")))
+            _fig5.add_trace(go.Scatter(
+                x=_pp["competency"], y=_pp["in_sample_r2"], mode="markers",
+                name="before honesty check", marker=dict(
+                    symbol="diamond", size=11, color="#95a5a6")))
+            _fig5.add_hline(y=0, line_color="#555")
+            _fig5.update_layout(
+                height=400, yaxis_tickformat=".0%",
+                yaxis_title="how much a district's circumstances explain",
+                xaxis_title="", legend=dict(orientation="h", y=-0.28),
+                margin=dict(l=10, r=10, t=30, b=10))
+            st.plotly_chart(_fig5, use_container_width=True)
+
+            _neg = _pp[_pp["loo_r2"] < 0]
+            _negtxt = ""
+            if len(_neg):
+                _negtxt = (
+                    f"\n\n**Bars below the line** ({', '.join(_neg['competency'])}) "
+                    f"mean circumstances tell us *nothing* — we would guess "
+                    f"better by just using the state average. Those skills "
+                    f"are decided in the classroom, not by the district.")
+
+            st.markdown(f"""**Graph 5 — how far a district's circumstances reach into each skill.**
+
+Taller bar = more of the difference between districts is already written by
+income, literacy and teacher supply.
+
+The **grey diamonds** are what the same model claims about districts it has
+already seen. They sit higher than the bars every time — that gap is the model
+flattering itself, and it is exactly why we report the bars instead.{_negtxt}""")
+
+            with st.expander("📋 Competency by competency"):
+                st.dataframe(
+                    _pt.rename(columns={
+                        "competency": "Competency", "mean_score": "State mean %",
+                        "in_sample_r2": "Flattering R²",
+                        "loo_r2": "Honest R²", "loo_mae": "Typical miss (pts)",
+                        "n": "Districts"}).round(3),
+                    use_container_width=True, hide_index=True)
+                st.caption("Context used: " + ", ".join(_pred["controls"]))
 
         # =================================================================
         #  the detail, folded away
